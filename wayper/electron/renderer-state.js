@@ -87,6 +87,11 @@ let appState = {
     modelReviewSelectedPath: null,  // Item currently inspected in the review workspace
     modelReviewSource: null,        // Visible review lane: held or recommended
     modelReviewActionInFlight: new Set(), // Paths being resolved from the workspace
+    // A file move made by a Review decision is echoed by the SSE library
+    // watcher shortly after the action returns. Keep that event from
+    // rebuilding the mounted card deck while its optimistic transition is
+    // still settling.
+    modelReviewActionRefreshSuppressedUntil: 0,
     modelReviewClearInFlight: false, // Bulk neutral filtering of the held queue
     modelReviewStrategySaving: false, // Prevent concurrent strategy toggles
     modelReviewResolvedPaths: new Set(), // Decisions made during the current queue view
@@ -474,8 +479,8 @@ function handleGlobalKeydown(e) {
         return;
     }
 
-    // Model-review rows have their own keyboard actions.  Keep this guard
-    // before the gallery shortcuts: otherwise D/X/Delete would remove the current
+    // Model-review rows have their own keyboard actions. Keep this guard
+    // before the gallery shortcuts: otherwise D would remove the current
     // wallpaper and Enter/Space would open an unrelated focused card.
     if (!lightboxEl) {
         const modelReviewTarget = e.target?.closest?.('.model-review-row');
@@ -520,9 +525,16 @@ function handleGlobalKeydown(e) {
                 void resolveModelReviewDecision(selected, 'keep');
                 return;
             }
-            if (['d', 'D', 'x', 'X', 'Delete'].includes(e.key) && selected) {
+            if (['d', 'D'].includes(e.key) && selected) {
                 e.preventDefault();
                 void resolveModelReviewDecision(selected, 'ban');
+                return;
+            }
+            // X/Delete is the exact-image ban shortcut in the library. Consume
+            // it here so it cannot leak through to that unrelated action, but
+            // keep Review decisions on the single, explicit D shortcut.
+            if (['x', 'X', 'Delete'].includes(e.key)) {
+                e.preventDefault();
                 return;
             }
             if (['Enter', ' ', 'a', 'A', 'd', 'D', 'x', 'X', 'Delete'].includes(e.key)) return;
@@ -607,12 +619,9 @@ function handleGlobalKeydown(e) {
             case 'Delete':
                 if (lightboxImg) {
                     e.preventDefault();
-                    if (lightboxImg.reviewOnly) {
-                        void banLightboxReviewSuggestion();
-                    } else {
-                        banImage(lightboxImg.path);
-                        closeLightbox();
-                    }
+                    if (lightboxImg.reviewOnly) return;
+                    banImage(lightboxImg.path);
+                    closeLightbox();
                 }
                 return;
             case 'o':

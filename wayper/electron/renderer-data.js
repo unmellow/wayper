@@ -24,6 +24,7 @@ const FILTER_STRATEGY_LABELS = {
     'rules+model': 'Rules + model',
 };
 const MODEL_REVIEW_RECOMMENDATION_CACHE_MS = 60_000;
+const MODEL_REVIEW_ACTION_REFRESH_GRACE_MS = 1_500;
 // Keep only this many recommendation cards mounted at once. The backing
 // recommendation list is complete so resolving a card can reveal the next one
 // immediately without making the reported total equal to the window size.
@@ -31,6 +32,21 @@ const MODEL_REVIEW_WINDOW_SIZE = 24;
 const MODEL_REVIEW_RECOMMENDATION_STORAGE_KEY = 'wayper.model-review.recommendations.v1';
 const MODEL_REVIEW_RECOMMENDATION_STORAGE_MAX_AGE_MS = 7 * 24 * 60 * 60 * 1000;
 const MODEL_REVIEW_RECOMMENDATION_STORAGE_LIMIT = 8;
+
+function suppressModelReviewLibraryRefresh() {
+    const current = Number(appState.modelReviewActionRefreshSuppressedUntil || 0);
+    appState.modelReviewActionRefreshSuppressedUntil = Math.max(
+        current,
+        Date.now() + MODEL_REVIEW_ACTION_REFRESH_GRACE_MS,
+    );
+}
+
+function shouldSuppressModelReviewLibraryRefresh() {
+    if (typeof isModelReviewMode !== 'function' || !isModelReviewMode()) return false;
+    const actions = appState.modelReviewActionInFlight;
+    if (actions && Number(actions.size) > 0) return true;
+    return Number(appState.modelReviewActionRefreshSuppressedUntil || 0) > Date.now();
+}
 
 function currentFilterStrategy() {
     const strategy = appState.config?.wallhaven?.filter_strategy
@@ -2312,7 +2328,12 @@ function connectSSE() {
                 invalidateModelReviewCaches();
                 // Counts alone can stay equal after multiple external actions.
                 // Refresh the page too; it independently refreshes the status.
-                refreshImages(true);
+                // A local Review decision already removed its card optimistically.
+                // The file move is reported by this same watcher a moment later;
+                // rebuilding the deck here makes one click visibly jump twice.
+                if (!shouldSuppressModelReviewLibraryRefresh()) {
+                    refreshImages(true);
+                }
             } else if (data.type === 'wallpaper') {
                 fetchMonitors();
             }

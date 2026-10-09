@@ -42,6 +42,22 @@ async function run() {
     assert.deepEqual(JSON.parse(JSON.stringify(calls)), ['blocklist', 'review', ['refresh', true]],
         'a global hotkey must refresh hidden windows immediately, even if counts stay equal');
 
+    // A Review decision has already reconciled its card locally. The library
+    // watcher sees the same file move shortly afterwards and must not rebuild
+    // the visible deck a second time.
+    context.appState.mode = 'model-review';
+    vm.runInContext(
+        "appState.modelReviewActionInFlight = new Set(['pending.jpg']); isModelReviewMode = () => true;",
+        context,
+    );
+    const refreshesBeforeReviewEvent = calls.filter(call => Array.isArray(call)).length;
+    stream.onmessage({ data: JSON.stringify({ type: 'library' }) });
+    assert.equal(
+        calls.filter(call => Array.isArray(call)).length,
+        refreshesBeforeReviewEvent,
+        'an in-flight Review action must suppress its SSE refresh',
+    );
+
     finishPrefetch({ ok: true, json: async () => ({ items: [{ path: 'stale.jpg' }] }) });
     assert.equal(await pending, false);
     assert.equal(cache.size, 0, 'an older prefetch must not restore invalidated images');

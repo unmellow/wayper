@@ -625,7 +625,6 @@ async function testReviewRowsHandleKeyboardActions() {
         `preview:${itemA.path}`,
         `keep:${itemA.path}`,
         `keep:${itemB.path}`,
-        `ban:${itemA.path}`,
         `focus:${itemB.path}`,
     ]);
 }
@@ -925,7 +924,6 @@ function testGridNavigationBridgesModelReview() {
     assert.deepEqual(deckDecisions, [
         [deckItem.path, 'keep'],
         [deckItem.path, 'ban'],
-        [deckItem.path, 'ban'],
     ]);
     assert.deepEqual(hiddenGalleryActions, []);
     assert.equal(context.document.activeElement, focusBeforeHiddenShortcuts);
@@ -949,6 +947,7 @@ function testGridNavigationBridgesModelReview() {
     renderer.handleGlobalKeydown(keyEvent('a'));
     renderer.handleGlobalKeydown(keyEvent('A'));
     renderer.handleGlobalKeydown(keyEvent('k'));
+    renderer.handleGlobalKeydown(keyEvent('x'));
     assert.deepEqual(lightboxArrows, [-1, 1]);
     assert.equal(lightboxKeepCalls.length, 2);
 }

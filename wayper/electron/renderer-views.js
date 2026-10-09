@@ -991,7 +991,7 @@ function moveModelReviewFocus(row, direction) {
  *
  * Rows are focusable in addition to their individual controls.  This lets a
  * keyboard user review a queue efficiently (Enter/Space to preview, A to
- * keep, D (or legacy X/Delete) to dislike, and arrows to move between candidates) without
+ * keep, D to dislike, and arrows to move between candidates) without
  * falling through to the gallery's global shortcuts, which otherwise operate
  * on the unrelated current wallpaper.
  */
@@ -1042,12 +1042,20 @@ function handleModelReviewRowKeyboard(event) {
         return true;
     }
 
-    if (['d', 'D', 'x', 'X', 'Delete'].includes(key)) {
+    if (key === 'd' || key === 'D') {
         event.preventDefault();
         event.stopPropagation();
         if (!row.classList?.contains?.('is-busy')) {
             void banPreferenceSuggestion(item, row);
         }
+        return true;
+    }
+
+    // X/Delete is reserved for exact-image bans in the library. Consume it
+    // while a review row owns focus, but do not turn it into a Review dislike.
+    if (key === 'x' || key === 'X' || key === 'Delete') {
+        event.preventDefault();
+        event.stopPropagation();
         return true;
     }
 
@@ -1213,7 +1221,7 @@ function createPreferenceReviewRow(item) {
     );
     row.setAttribute?.(
         'aria-keyshortcuts',
-        'ArrowUp ArrowDown ArrowLeft ArrowRight Enter Space A D X Delete',
+        'ArrowUp ArrowDown ArrowLeft ArrowRight Enter Space A D',
     );
     row.onkeydown = handleModelReviewRowKeyboard;
 
@@ -1354,7 +1362,7 @@ function createPreferenceReviewRow(item) {
     ban.textContent = 'Dislike';
     ban.title = `Dislike ${item.name || 'wallpaper'} and teach the model (D)`;
     ban.setAttribute('aria-label', `Dislike ${item.name || 'wallpaper'} (D)`);
-    ban.setAttribute('aria-keyshortcuts', 'D X Delete');
+    ban.setAttribute('aria-keyshortcuts', 'D');
     ban.onclick = event => {
         event.stopPropagation();
         banPreferenceSuggestion(item, row);
@@ -1987,7 +1995,7 @@ function createModelReviewCard(item, index, total) {
     );
     card.setAttribute(
         'aria-keyshortcuts',
-        'ArrowLeft ArrowRight ArrowUp ArrowDown Enter Space A D X Delete',
+        'ArrowLeft ArrowRight ArrowUp ArrowDown Enter Space A D',
     );
 
     const preview = document.createElement('button');
@@ -2076,7 +2084,7 @@ function createModelReviewCard(item, index, total) {
     ban.title = automaticallyHeld
         ? 'Confirm the dislike, teach the model, and send to trash (D)'
         : 'Dislike, teach the model, and move to Blocklist (D)';
-    ban.setAttribute('aria-keyshortcuts', 'D X Delete');
+    ban.setAttribute('aria-keyshortcuts', 'D');
     decorateModelReviewDecisionButton(ban, 'ban');
     actions.appendChild(ban);
 
@@ -2521,6 +2529,13 @@ async function resolveModelReviewDecision(item, action) {
     }
     if (appState.modelReviewActionInFlight.has(item.path)) return false;
     appState.modelReviewActionInFlight.add(item.path);
+    // The backend's file move is observed by the SSE watcher independently of
+    // this request. Suppress that follow-up refresh so the optimistic deck
+    // transition remains the only visible layout update for this click.
+    const movesLibraryFile = item.auto_filtered === true || action === 'ban';
+    if (movesLibraryFile && typeof suppressModelReviewLibraryRefresh === 'function') {
+        suppressModelReviewLibraryRefresh();
+    }
     // Mark the choice before the network request starts.  The old UI only
     // changed after the request returned, which made a click feel ignored on
     // a slow API or while a local model action was being queued.
@@ -2665,7 +2680,7 @@ function createModelReviewWorkspace(data) {
     workspace.setAttribute('aria-label', 'Model review');
     workspace.setAttribute(
         'aria-keyshortcuts',
-        'ArrowLeft ArrowRight ArrowUp ArrowDown Enter Space A X Delete',
+        'ArrowLeft ArrowRight ArrowUp ArrowDown Enter Space A D',
     );
 
     if (!items.length && data?.recommendation_status === 'pending') {
