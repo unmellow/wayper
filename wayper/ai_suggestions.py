@@ -15,12 +15,9 @@ from pathlib import Path
 
 from .catalog import ImageCatalog, net_benefit
 from .config import WayperConfig
-from .pool import (
-    favorite_filenames,
-    list_blacklist,
-    load_metadata,
-)
+from .pool import list_blacklist, load_metadata
 from .state import read_mode
+from .suggestion_data import load_suggestion_catalog
 from .suggestions import (
     FAV_WEIGHT,
     KEPT_WEIGHT,
@@ -898,18 +895,16 @@ async def _generate_ai_suggestions_impl(config: WayperConfig) -> dict:
     if not metadata:
         raise AISuggestionError("No metadata available. Download some wallpapers first.")
 
-    blacklist_entries = list_blacklist(config)
-    if not blacklist_entries:
-        raise AISuggestionError("No banned images. Ban some wallpapers first.")
-
     # Filter to current purity mode — stale data from inactive modes hurts suggestions
     active_purities = read_mode(config)
-    metadata = {
-        fn: meta for fn, meta in metadata.items() if meta.get("purity", "sfw") in active_purities
-    }
+    catalog = load_suggestion_catalog(config, purities=active_purities, metadata_snapshot=metadata)
+    metadata = catalog.metadata
+    blacklisted = set(catalog.banned_filenames)
+    fav_files_set = set(catalog.favorite_filenames)
+    if not blacklisted:
+        raise AISuggestionError("No banned images in the selected purity modes.")
 
-    blacklisted = {fn for _, fn in blacklist_entries if fn in metadata}
-    fav_files_set = favorite_filenames(config, active_purities)
+    blacklist_entries = list_blacklist(config)
 
     _ai_status["phase"] = "preparing"
     _ai_status["detail"] = "Collecting tags"
@@ -999,7 +994,7 @@ async def _generate_ai_suggestions_impl(config: WayperConfig) -> dict:
     for ts, fn in blacklist_entries:
         if len(recent_bans) >= 20:
             break
-        if fn not in metadata:
+        if fn not in blacklisted:
             continue
         tags = metadata[fn].get("tags", [])
         if not tags:

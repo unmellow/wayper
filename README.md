@@ -169,6 +169,13 @@ wayper setup                # install .desktop entry (Linux)
 wayper --json status        # machine-readable output
 ```
 
+Exclusion suggestions and tag/uploader statistics use durable ban history and the
+latest feedback, not just the current blacklist. Unblock, Keep, and Favorite actions
+override older bans. Kept evidence comes from live pool/favorite files or explicit
+Keep/Favorite feedback; missing metadata-only files and neutral model quarantine or
+queue clearing do not count as positive or negative feedback. Favorites still veto
+broader exclusions, and the existing suggestion thresholds are unchanged.
+
 `wayper model train` learns from local Wallhaven metadata only: normalized tags and
 compact color/category/purity context. It never opens image files or reads pixels.
 FastEmbed is installed with Wayper; `BAAI/bge-small-en-v1.5` is downloaded and cached on

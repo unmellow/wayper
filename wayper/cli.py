@@ -22,7 +22,7 @@ from .core import (
     do_unfav,
     metadata_backfill_status,
 )
-from .pool import favorite_filenames, should_download
+from .pool import should_download
 from .state import ALL_PURITIES, read_mode, toggle_base, toggle_purity, write_mode
 from .status import status_snapshot
 
@@ -476,18 +476,16 @@ def suggest(ctx, use_ai):
             if not result["add_suggestions"] and not result["remove_suggestions"]:
                 click.echo("No suggestions at this time.")
     else:
-        from .pool import list_blacklist, load_metadata
+        from .suggestion_data import load_suggestion_catalog
         from .suggestions import suggest_tags_to_exclude
 
-        metadata = load_metadata(config)
-        blacklisted = {fn for _, fn in list_blacklist(config)}
-        favorites = favorite_filenames(config)
+        catalog = load_suggestion_catalog(config)
         results = suggest_tags_to_exclude(
-            metadata,
-            blacklisted,
+            catalog.metadata,
+            set(catalog.banned_filenames),
             config.wallhaven.exclude_tags,
             config.wallhaven.exclude_combos,
-            favorites,
+            set(catalog.favorite_filenames),
         )
         if use_json:
             click.echo(json_mod.dumps({"suggestions": results}, ensure_ascii=False, indent=2))

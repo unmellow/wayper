@@ -23,12 +23,12 @@ from .pool import (
     IMAGE_EXTENSIONS,
     favorite_filenames,
     favorites_dir,
-    list_blacklist,
     load_metadata,
     pool_dir,
 )
 from .state import ALL_PURITIES, read_mode, write_mode
 from .status import status_snapshot
+from .suggestion_data import load_suggestion_catalog
 from .tags import normalize_tag
 
 mcp = FastMCP("wayper")
@@ -256,12 +256,7 @@ def _collect_favorites(config=None) -> set[str]:
 def _build_catalog(purity: str | None = None) -> ImageCatalog:
     config = _config()
     purities = [value.strip() for value in purity.split(",") if value.strip()] if purity else None
-    return ImageCatalog(
-        load_metadata(config),
-        (filename for _, filename in list_blacklist(config)),
-        _collect_favorites(config),
-        purities=purities,
-    )
+    return load_suggestion_catalog(config, purities=purities)
 
 
 def _build_tag_counts(

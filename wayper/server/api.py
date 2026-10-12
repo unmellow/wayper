@@ -74,6 +74,7 @@ from wayper.state import (
     write_mode,
 )
 from wayper.status import library_counts
+from wayper.suggestion_data import load_suggestion_catalog
 from wayper.suggestions import suggest_combo_patterns, suggest_tags_to_exclude
 from wayper.tags import normalize_tag
 from wayper.update import check_for_updates
@@ -307,15 +308,13 @@ def _preference_suggestion_state_key(
 def _active_suggestion_data(
     config: WayperConfig,
 ) -> tuple[dict, set[str], set[str]]:
-    """Return metadata and labels restricted to the active purity modes."""
-    favorites = _build_favs_set(config)
-    catalog = ImageCatalog(
-        _get_metadata(),
-        (filename for _, filename in list_blacklist(config)),
-        favorites,
+    """Return durable suggestion evidence restricted to the active purity modes."""
+    catalog = load_suggestion_catalog(
+        config,
         purities=read_mode(config),
+        metadata_snapshot=_get_metadata(),
     )
-    return catalog.metadata, set(catalog.banned_filenames), favorites
+    return catalog.metadata, set(catalog.banned_filenames), set(catalog.favorite_filenames)
 
 
 def _build_favs_set(config) -> set[str]:
@@ -1638,11 +1637,10 @@ def tag_stats(
     """
     config = get_config()
     purities = [value.strip() for value in purity.split(",") if value.strip()] or None
-    catalog = ImageCatalog(
-        _get_metadata(),
-        (filename for _, filename in list_blacklist(config)),
-        _build_favs_set(config),
+    catalog = load_suggestion_catalog(
+        config,
         purities=purities,
+        metadata_snapshot=_get_metadata(),
     )
     tag_banned, tag_kept, tag_fav = catalog.tag_counts()
 
