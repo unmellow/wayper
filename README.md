@@ -176,11 +176,13 @@ first use to provide the semantic path. Every
 explicit Keep/Dislike remains available to KNN retrieval: an IDF-weighted pooled matrix
 does coarse retrieval, then only the top candidates are reranked with exact overlap,
 per-tag MaxSim, category/color/purity context, and balanced Keep/Dislike evidence. The
-global sparse+dense head fits a balanced recent working set of at most 2,048 examples,
-while the KNN memory is not truncated. The final decision keeps 80% of the local vote
-and 20% of the global preference probability, then applies one boundary calibrated on
-at most 640 held-out decisions for at least 80% precision. Embeddings are metadata-only
-and cached locally.
+global sparse+dense head fits a class-balanced working set of at most 2,048 examples,
+sharing its budget across purities and preferring recent feedback within each purity,
+while the KNN memory is not truncated. The final decision learns the blend of local
+votes and global preference probability from an inner holdout, then applies one boundary
+calibrated on at most 640 independent decisions for at least 80% precision. Holdouts are
+stratified by label and purity so reviewing SFW does not crowd out NSFW/Sketchy feedback.
+Embeddings are metadata-only and cached locally.
 New downloads preserve complete Wallhaven tag objects; use `wayper metadata backfill`
 to repair older live/model-relevant records without exceeding the API rate limit.
 

@@ -7,6 +7,8 @@ import tempfile
 import threading
 import time
 import unittest
+from collections import Counter
+from dataclasses import replace
 from pathlib import Path
 from unittest.mock import patch
 
@@ -402,15 +404,28 @@ class PreferenceModelTest(unittest.TestCase):
         model.semantic_weights = (0.0,)
         model.training_summary["decision_calibration"] = {
             "available": True,
-            "version": 6,
+            "version": DECISION_CALIBRATION_VERSION - 1,
             "threshold": 0.5,
         }
 
         with tempfile.TemporaryDirectory() as td:
-            status = auto_filter_status(WayperConfig(download_dir=Path(td)), model)
+            config = WayperConfig(download_dir=Path(td))
+            status = auto_filter_status(config, model)
+            learning = preference_learning_status(
+                config,
+                model,
+                PreferenceTrainingSnapshot(
+                    examples=tuple(examples),
+                    feedback_revision=0,
+                    data_signature=_training_data_signature(examples),
+                    favorite_files=0,
+                ),
+            )
 
         self.assertFalse(status["ready"])
         self.assertEqual(status["status"], "calibration_pending")
+        self.assertTrue(learning["decision_boundary_upgrade_due"])
+        self.assertTrue(learning["due"])
 
     def test_fitting_is_bounded_but_knn_retains_all_explicit_labels(self) -> None:
         examples = [
@@ -426,6 +441,48 @@ class PreferenceModelTest(unittest.TestCase):
         self.assertEqual(model.training_summary["working_examples"], 2_048)
         self.assertEqual(len(model.neighbor_prototypes), 3_000)
         self.assertNotIn("recommendation_strategy", model.training_summary)
+
+    def test_fitting_preserves_older_purities_and_recency_within_each_class(self) -> None:
+        examples = [
+            replace(example, context_features=(f"purity:{purity}",))
+            for purity, start in (("nsfw", 1_000), ("sketchy", 2_000), ("sfw", 10_000))
+            for label in (0, 1)
+            for example in _examples(f"{purity}-{label}-", 100, ("detail",), label, start=start)
+        ]
+
+        working = select_preference_examples(examples, limit=60)
+
+        self.assertEqual(len(working), 60)
+        self.assertEqual(
+            Counter((example.context_features[0], example.label) for example in working),
+            {
+                (f"purity:{purity}", label): 10
+                for purity in ("sfw", "sketchy", "nsfw")
+                for label in (0, 1)
+            },
+        )
+        self.assertTrue(
+            all(int(example.filename.rsplit("-", 1)[1][:-4]) >= 90 for example in working)
+        )
+        self.assertEqual(working, select_preference_examples(reversed(examples), limit=60))
+
+    def test_fitting_redistributes_small_purity_and_class_budgets(self) -> None:
+        examples = [
+            replace(example, context_features=(f"purity:{purity}",))
+            for purity, count in (("sfw", 50), ("nsfw", 3))
+            for example in _examples(purity, count, ("detail",), 1)
+        ] + _examples("keep", 5, ("calm",), 0)
+
+        working = select_preference_examples(examples, limit=21)
+
+        self.assertEqual(len(working), 21)
+        self.assertEqual(len({example.filename for example in working}), 21)
+        self.assertEqual(sum(example.label == 0 for example in working), 5)
+        self.assertEqual(
+            sum(example.context_features == ("purity:nsfw",) for example in working), 3
+        )
+        self.assertEqual(select_preference_examples(examples, limit=1), ())
+        self.assertEqual(select_preference_examples(examples[:-5]), ())
 
     def test_library_predictions_are_bounded_to_small_batches(self) -> None:
         class FakeModel:
@@ -1109,32 +1166,87 @@ class PreferenceModelTest(unittest.TestCase):
         self.assertEqual(sum(example.label == 0 for example in holdout), 320)
         self.assertEqual(sum(example.label == 1 for example in holdout), 320)
 
+    def test_calibration_represents_each_purity_even_after_sfw_only_feedback(self) -> None:
+        from wayper.preference.training import _decision_calibration_split
+
+        examples = [
+            replace(example, context_features=(f"purity:{purity}",))
+            for purity, count, start in (
+                ("nsfw", 100, 1_000),
+                ("sketchy", 200, 2_000),
+                ("sfw", 300, 10_000),
+            )
+            for label in (0, 1)
+            for example in _examples(f"{purity}-{label}-", count, ("detail",), label, start=start)
+        ]
+
+        training, holdout = _decision_calibration_split(examples)
+
+        self.assertEqual(
+            Counter((example.context_features[0], example.label) for example in holdout),
+            {
+                (f"purity:{purity}", label): count
+                for purity, count in (("sfw", 60), ("sketchy", 40), ("nsfw", 20))
+                for label in (0, 1)
+            },
+        )
+        self.assertFalse(
+            {example.filename for example in training} & {example.filename for example in holdout}
+        )
+        for purity in ("sfw", "sketchy", "nsfw"):
+            for label in (0, 1):
+                key = (f"purity:{purity}",)
+                self.assertLess(
+                    max(
+                        example.timestamp
+                        for example in training
+                        if example.context_features == key and example.label == label
+                    ),
+                    min(
+                        example.timestamp
+                        for example in holdout
+                        if example.context_features == key and example.label == label
+                    ),
+                )
+        self.assertEqual((training, holdout), _decision_calibration_split(list(reversed(examples))))
+
+    def test_calibration_keeps_small_purity_groups_in_training(self) -> None:
+        from wayper.preference.training import _decision_calibration_split
+
+        examples = [
+            replace(example, context_features=(f"purity:{purity}",))
+            for purity, count in (("nsfw", 10), ("sketchy", 11), ("sfw", 100))
+            for label in (0, 1)
+            for example in _examples(f"{purity}-{label}-", count, ("detail",), label)
+        ]
+
+        training, holdout = _decision_calibration_split(examples)
+
+        self.assertEqual(len(holdout), 48)
+        self.assertEqual(
+            sum(example.context_features == ("purity:nsfw",) for example in training), 20
+        )
+        self.assertEqual(
+            sum(example.context_features == ("purity:sketchy",) for example in training), 20
+        )
+        self.assertFalse(any(example.context_features == ("purity:nsfw",) for example in holdout))
+        sparse = [example for example in examples if example.context_features != ("purity:sfw",)]
+        self.assertEqual(_decision_calibration_split(sparse), ([], []))
+
     def test_review_boundary_is_learned_from_recent_explicit_holdout(self) -> None:
         from wayper.preference import training as training_module
 
         examples = [
-            *[
-                PreferenceExample(
-                    filename=f"ban-{index}.jpg",
-                    tags=("bad", "detail"),
-                    label=1,
-                    base_weight=1.0,
-                    timestamp=1_700_000_000 + index,
-                    is_explicit_ban=True,
-                )
-                for index in range(30)
-            ],
-            *[
-                PreferenceExample(
-                    filename=f"keep-{index}.jpg",
-                    tags=("good", "detail"),
-                    label=0,
-                    base_weight=1.0,
-                    timestamp=1_700_001_000 + index,
-                    is_explicit_keep=True,
-                )
-                for index in range(30)
-            ],
+            replace(example, context_features=(f"purity:{purity}",))
+            for purity, start in (("nsfw", 1_000), ("sketchy", 2_000), ("sfw", 10_000))
+            for label in (0, 1)
+            for example in _examples(
+                f"{purity}-{label}-",
+                30,
+                ("bad" if label else "good", "detail"),
+                label,
+                start=start,
+            )
         ]
 
         def fake_embed(texts, *, model_name, batch_size=64):
@@ -1180,8 +1292,16 @@ class PreferenceModelTest(unittest.TestCase):
         ):
             model = train_preference_model(examples, epochs=8, semantic_model="fake-model")
             calibration = model.training_summary["decision_calibration"]
-            held, _ = auto_filter_prediction(model, {"tags": ["bad", "detail"]})
-            kept, _ = auto_filter_prediction(model, {"tags": ["good", "detail"]})
+            for purity in ("sfw", "sketchy", "nsfw"):
+                with self.subTest(purity=purity):
+                    held, _ = auto_filter_prediction(
+                        model, {"tags": ["bad", "detail"], "purity": purity}
+                    )
+                    kept, _ = auto_filter_prediction(
+                        model, {"tags": ["good", "detail"], "purity": purity}
+                    )
+                    self.assertTrue(held)
+                    self.assertFalse(kept)
 
         self.assertTrue(calibration["available"])
         self.assertEqual(calibration["source"], "stratified_recent_holdout")
@@ -1192,8 +1312,6 @@ class PreferenceModelTest(unittest.TestCase):
             preference_decision_threshold(model),
             calibration["threshold"],
         )
-        self.assertTrue(held)
-        self.assertFalse(kept)
         self.assertTrue(model.training_summary["decision_blend"]["available"])
         self.assertEqual(len(blend_partitions), 1)
         self.assertEqual(len(calibration_partitions), 1)

@@ -29,6 +29,7 @@ from .model import (
     _active_feature_values,
     _context_min_support,
     _ftrl_weight,
+    _group_examples_by_purity,
     _has_dislike_neighbor_evidence,
     _model_tags,
     _normalize_context_features,
@@ -43,7 +44,7 @@ from .model import (
 
 DECISION_CALIBRATION_FRACTION = 0.20
 DECISION_TARGET_PRECISION = 0.80
-DECISION_CALIBRATION_VERSION = 7
+DECISION_CALIBRATION_VERSION = 8
 DECISION_CALIBRATION_MAX_PER_CLASS = 320
 DECISION_MINIMUM_BOUNDARY = 0.50
 DECISION_CALIBRATION_OBJECTIVE = "two_stage_precision_at_least_0_80"
@@ -93,7 +94,7 @@ def _attach_semantic_head(
 def _decision_calibration_split(
     examples: list[PreferenceExample],
 ) -> tuple[list[PreferenceExample], list[PreferenceExample]]:
-    """Reserve a bounded recent holdout and bound the model's working set."""
+    """Reserve a recent label/purity-stratified holdout and bound the fitting set."""
     explicit = [
         example
         for example in examples
@@ -117,14 +118,41 @@ def _decision_calibration_split(
             DECISION_CALIBRATION_MAX_PER_CLASS,
             len(grouped[label]) - MIN_TRAINING_PER_CLASS,
         )
-        recent = heapq.nlargest(
-            holdout_count,
-            grouped[label],
-            key=lambda example: (example.timestamp, example.filename),
-        )
+        purity_groups = _group_examples_by_purity(grouped[label])
+        capacities = {
+            purity: max(0, len(group) - MIN_TRAINING_PER_CLASS)
+            for purity, group in purity_groups.items()
+        }
+        holdout_count = min(holdout_count, sum(capacities.values()))
+        targets = {
+            purity: holdout_count * len(group) / len(grouped[label])
+            for purity, group in purity_groups.items()
+        }
+        quotas = {
+            purity: min(int(target), capacities[purity]) for purity, target in targets.items()
+        }
+        # Preserve each purity's share instead of validating only the mode
+        # reviewed most recently. Small groups retain enough fitting examples.
+        for _ in range(holdout_count - sum(quotas.values())):
+            purity = min(
+                (purity for purity in quotas if quotas[purity] < capacities[purity]),
+                key=lambda purity: (quotas[purity] - targets[purity], purity),
+            )
+            quotas[purity] += 1
+        recent = [
+            example
+            for purity, group in purity_groups.items()
+            for example in heapq.nlargest(
+                quotas[purity],
+                group,
+                key=lambda example: (example.timestamp, example.filename),
+            )
+        ]
         recent_ids = {id(example) for example in recent}
         training.extend(example for example in grouped[label] if id(example) not in recent_ids)
         holdout.extend(recent)
+    if not _has_both_classes(holdout, MIN_VALIDATION_PER_CLASS):
+        return [], []
     bounded_training = list(
         select_preference_examples(training, limit=DEFAULT_TRAINING_MAX_EXAMPLES)
     )

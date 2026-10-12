@@ -1369,7 +1369,7 @@ def select_preference_examples(
     limit: int = DEFAULT_TRAINING_MAX_EXAMPLES,
     explicit_only: bool = False,
 ) -> tuple[PreferenceExample, ...]:
-    """Select a recent class-balanced fitting set in O(n log limit) time."""
+    """Select a bounded class-balanced set without forgetting inactive purities."""
     if limit < 2:
         return ()
     candidates = [
@@ -1386,10 +1386,9 @@ def select_preference_examples(
 
     per_class = limit // 2
     grouped = {
-        label: heapq.nlargest(
-            per_class,
+        label: _select_recent_purity_examples(
             (example for example in candidates if example.label == label),
-            key=recency_key,
+            per_class,
         )
         for label in (0, 1)
     }
@@ -1397,13 +1396,53 @@ def select_preference_examples(
         return ()
     selected = [*grouped[0], *grouped[1]]
     selected_ids = {id(example) for example in selected}
-    remainder = heapq.nlargest(
-        max(0, limit - len(selected)),
+    remainder = _select_recent_purity_examples(
         (example for example in candidates if id(example) not in selected_ids),
-        key=recency_key,
+        max(0, limit - len(selected)),
     )
     selected.extend(remainder)
     return tuple(sorted(selected, key=recency_key))
+
+
+def _group_examples_by_purity(
+    examples: Iterable[PreferenceExample],
+) -> dict[str, list[PreferenceExample]]:
+    groups: dict[str, list[PreferenceExample]] = {}
+    for example in examples:
+        purity = next(
+            (token for token in example.context_features if token.startswith("purity:")),
+            "",
+        )
+        groups.setdefault(purity, []).append(example)
+    return groups
+
+
+def _select_recent_purity_examples(
+    examples: Iterable[PreferenceExample],
+    limit: int,
+) -> list[PreferenceExample]:
+    """Share the budget across purities, redistributing unused small-group slots."""
+    groups = _group_examples_by_purity(examples)
+    quotas = dict.fromkeys(groups, 0)
+    remaining = min(max(0, limit), sum(len(group) for group in groups.values()))
+    while remaining:
+        active = sorted(purity for purity, group in groups.items() if quotas[purity] < len(group))
+        share = max(1, remaining // len(active))
+        for purity in active:
+            added = min(share, remaining, len(groups[purity]) - quotas[purity])
+            quotas[purity] += added
+            remaining -= added
+    # Recent feedback within one mode must not evict every older example from
+    # another mode, turning purity itself into a proxy for Keep or Dislike.
+    return [
+        example
+        for purity, group in groups.items()
+        for example in heapq.nlargest(
+            quotas[purity],
+            group,
+            key=lambda example: (example.timestamp, example.filename, example.label),
+        )
+    ]
 
 
 def build_neighbor_prototypes(
