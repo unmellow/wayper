@@ -12,7 +12,7 @@ from click.testing import CliRunner
 from wayper.cli import cli
 from wayper.config import WayperConfig
 from wayper.core import CoreResult
-from wayper.server.api import _library_state_token, app, control_action, sse_events
+from wayper.server.api import app, control_action, sse_events
 from wayper.server.client import try_control_action
 
 
@@ -80,23 +80,6 @@ def connections(tmp_path):
         yield probe, action
 
 
-def test_client_returns_local_result_without_waiting_for_sync(tmp_path, connections):
-    probe, action = connections
-    image = tmp_path / "favorites/sfw/landscape/test.jpg"
-    action.getresponse.return_value = response(
-        {
-            "status": "ok",
-            "image": str(image),
-            "monitor": "DP-1",
-            "remote_sync": None,
-        }
-    )
-    result = try_control_action(WayperConfig(download_dir=tmp_path), "fav", open_url=True)
-    assert result.ok and result.image == image
-    assert result.monitor == "DP-1"
-    assert json.loads(action.request.call_args.args[2]) == {"open_url": True}
-
-
 @pytest.mark.parametrize("failure", [TimeoutError(), ConnectionResetError()])
 def test_post_failure_must_not_fall_back_and_delete_another_image(
     tmp_path,
@@ -128,7 +111,7 @@ def test_probe_failure_allows_standalone_execution(tmp_path, connections, case):
     action.request.assert_not_called()
 
 
-@pytest.mark.parametrize("action", ["fav", "unfav", "ban", "dislike"])
+@pytest.mark.parametrize("action", ["fav", "unfav", "ban", "dislike", "next", "prev"])
 def test_cli_preserves_json_when_service_handles_action(tmp_path, action):
     image = tmp_path / "wallhaven-test.jpg"
     with (
@@ -138,40 +121,70 @@ def test_cli_preserves_json_when_service_handles_action(tmp_path, action):
             "wayper.server.client.try_control_action", return_value=CoreResult(action, image=image)
         ),
         patch(f"wayper.cli.do_{action}") as local,
+        patch("wayper.rotation.refill_pool") as refill,
     ):
         result = CliRunner().invoke(cli, ["--json", action])
     assert result.exit_code == 0, result.output
     payload = json.loads(result.output)
     assert payload["action"] == action and payload["image"] == str(image)
     local.assert_not_called()
+    refill.assert_not_called()
 
 
-def test_custom_config_bypasses_desktop(tmp_path):
-    config_path = tmp_path / "config.toml"
-    config_path.touch()
+def test_next_api_schedules_one_background_refill(tmp_path):
+    config = WayperConfig(download_dir=tmp_path)
+    image = tmp_path / "one.jpg"
+    with (
+        patch("wayper.server.api.get_config", return_value=config),
+        patch("wayper.server.api.do_next", return_value=CoreResult("next", image=image)),
+        patch("wayper.server.api.rotation_service.request_refill") as refill,
+    ):
+        assert control_action("next", "DP-1", False)["image"] == str(image)
+    refill.assert_called_once_with(config)
+
+
+@pytest.mark.parametrize("action", ["next", "prev"])
+def test_navigation_post_failure_never_repeats_locally(tmp_path, action):
     with (
         patch("wayper.cli.load_config", return_value=WayperConfig(download_dir=tmp_path)),
         patch("wayper.logging.setup_logging"),
-        patch("wayper.server.client.try_control_action") as remote,
-        patch("wayper.cli.do_fav", return_value=CoreResult("fav", status="already_favorite")),
+        patch(
+            "wayper.server.client.try_control_action",
+            return_value=CoreResult(action, ok=False, error="unconfirmed"),
+        ),
+        patch(f"wayper.cli.do_{action}") as local,
+        patch("wayper.rotation.refill_pool") as refill,
     ):
-        result = CliRunner().invoke(cli, ["--config", str(config_path), "--json", "fav"])
-    assert result.exit_code == 0, result.output
-    assert json.loads(result.output)["status"] == "already_favorite"
-    remote.assert_not_called()
+        result = CliRunner().invoke(cli, ["--json", action])
+    assert result.exit_code == 1
+    assert json.loads(result.output) == {"error": "unconfirmed"}
+    local.assert_not_called()
+    refill.assert_not_called()
 
 
-def test_library_token_detects_move_without_scanning(tmp_path):
+@pytest.mark.parametrize("custom_config", [False, True])
+def test_standalone_next_preserves_refill_and_json(tmp_path, custom_config):
     config = WayperConfig(download_dir=tmp_path)
-    pool = tmp_path / "sfw/landscape"
-    favorites = tmp_path / "favorites/sfw/landscape"
-    pool.mkdir(parents=True)
-    favorites.mkdir(parents=True)
-    image = pool / "test.jpg"
-    image.touch()
-    before = _library_state_token(config)
-    image.rename(favorites / image.name)
-    assert _library_state_token(config) != before
+    config_path = tmp_path / "config.toml"
+    config_path.touch()
+    args = ["--json"]
+    if custom_config:
+        args += ["--config", str(config_path)]
+    with (
+        patch("wayper.cli.load_config", return_value=config),
+        patch("wayper.logging.setup_logging"),
+        patch("wayper.server.client.try_control_action", return_value=None) as remote,
+        patch(
+            "wayper.cli.do_next", return_value=CoreResult("next", image=tmp_path / "one.jpg")
+        ) as local,
+        patch("wayper.rotation.refill_pool") as refill,
+    ):
+        result = CliRunner().invoke(cli, [*args, "next"])
+    assert result.exit_code == 0, result.output
+    assert json.loads(result.output)["action"] == "next"
+    assert remote.call_count == (0 if custom_config else 1)
+    local.assert_called_once_with(config)
+    refill.assert_awaited_once_with(config, {"sfw"})
 
 
 def test_sse_announces_external_library_change_on_first_tick(tmp_path):

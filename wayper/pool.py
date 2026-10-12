@@ -384,6 +384,11 @@ def _metadata_record(
     return record  # type: ignore[return-value]
 
 
+def metadata_lock_path(config: WayperConfig) -> Path:
+    """Serialize metadata writers independently of interactive wallpaper actions."""
+    return config.metadata_file.with_suffix(".json.lock")
+
+
 def save_metadata_batch(
     config: WayperConfig,
     items: Mapping[str, Mapping[str, object]],
@@ -396,7 +401,7 @@ def save_metadata_batch(
         return 0
     timestamp = int(time.time()) if fetched_at is None else int(fetched_at)
     mf = config.metadata_file
-    with FileLock():
+    with FileLock(path=metadata_lock_path(config)):
         data = _read_metadata_file(mf)
         for raw_filename, item in items.items():
             filename = Path(raw_filename).name
@@ -408,7 +413,7 @@ def save_metadata_batch(
                 complete=complete,
                 fetched_at=timestamp,
             )
-        atomic_write(mf, json.dumps(data, ensure_ascii=False, indent=2) + "\n")
+        atomic_write(mf, json.dumps(data, ensure_ascii=False, separators=(",", ":")) + "\n")
     return len(items)
 
 
@@ -432,7 +437,7 @@ def save_metadata(
 def hydrate_tag_details(config: WayperConfig) -> dict[str, int]:
     """Propagate known Wallhaven tag objects to legacy records with the same tag names."""
     mf = config.metadata_file
-    with FileLock():
+    with FileLock(path=metadata_lock_path(config)):
         data = _read_metadata_file(mf)
         catalog: dict[str, TagMetadata] = {}
         for record in data.values():
@@ -477,7 +482,7 @@ def hydrate_tag_details(config: WayperConfig) -> dict[str, int]:
             changed_records += int(record_changed)
             complete_records += int(is_complete)
         if changed_records:
-            atomic_write(mf, json.dumps(data, ensure_ascii=False, indent=2) + "\n")
+            atomic_write(mf, json.dumps(data, ensure_ascii=False, separators=(",", ":")) + "\n")
     return {
         "known_tags": len(catalog),
         "tag_complete_records": complete_records,

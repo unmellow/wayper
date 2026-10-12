@@ -5,6 +5,8 @@ from __future__ import annotations
 import os
 import tempfile
 import time
+from collections.abc import Callable, Iterator
+from contextlib import contextmanager
 from pathlib import Path
 
 _WINDOWS_REPLACE_ATTEMPTS = 5
@@ -25,8 +27,11 @@ def _replace_file(source: Path, destination: Path) -> None:
             time.sleep(_WINDOWS_REPLACE_RETRY_DELAY * (attempt + 1))
 
 
-def atomic_write(path: Path, content: str, *, encoding: str | None = None) -> None:
-    """Write content atomically via temp file + os.replace."""
+@contextmanager
+def prepare_atomic_write(
+    path: Path, content: str, *, encoding: str | None = None
+) -> Iterator[Callable[[], None]]:
+    """Stage and flush content, yielding a cheap atomic publish operation."""
     path.parent.mkdir(parents=True, exist_ok=True)
     fd, tmp_name = tempfile.mkstemp(prefix=f".{path.name}.", suffix=".tmp", dir=path.parent)
     tmp = Path(tmp_name)
@@ -37,10 +42,15 @@ def atomic_write(path: Path, content: str, *, encoding: str | None = None) -> No
             file.write(content)
             file.flush()
             os.fsync(file.fileno())
-        _replace_file(tmp, path)
-    except BaseException:
+        yield lambda: _replace_file(tmp, path)
+    finally:
         try:
-            tmp.unlink()
+            tmp.unlink(missing_ok=True)
         except OSError:
             pass
-        raise
+
+
+def atomic_write(path: Path, content: str, *, encoding: str | None = None) -> None:
+    """Write content atomically via temp file + os.replace."""
+    with prepare_atomic_write(path, content, encoding=encoding) as publish:
+        publish()

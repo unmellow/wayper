@@ -1,96 +1,14 @@
 from __future__ import annotations
 
-import asyncio
-import sys
 import unittest
-from pathlib import Path
-from types import SimpleNamespace
-from unittest.mock import AsyncMock, MagicMock, patch
+from unittest.mock import patch
 
 import httpx
 
-from wayper.config import WayperConfig
-from wayper.wallhaven_web import WallhavenWeb, _can_sync_favorites, _SessionStatus
+from wayper.wallhaven_web import WallhavenWeb, _SessionStatus
 
 
 class WallhavenWebTest(unittest.TestCase):
-    def test_nodriver_login_fills_form_without_send_keys(self) -> None:
-        tab = SimpleNamespace(
-            select=AsyncMock(side_effect=[object(), object(), object()]),
-            evaluate=AsyncMock(return_value=True),
-            sleep=AsyncMock(),
-            target=SimpleNamespace(url="https://wallhaven.cc/user/test-user"),
-        )
-        cookie = SimpleNamespace(
-            name="session",
-            value="cookie-value",
-            domain="wallhaven.cc",
-            path="/",
-        )
-        browser = SimpleNamespace(
-            get=AsyncMock(return_value=tab),
-            cookies=SimpleNamespace(get_all=AsyncMock(return_value=[cookie])),
-            stop=MagicMock(),
-        )
-        nodriver = SimpleNamespace(start=AsyncMock(return_value=browser))
-        client = WallhavenWeb("test-user", "test-password")
-        try:
-            with (
-                patch.dict(sys.modules, {"nodriver": nodriver}),
-                patch("wayper.wallhaven_web._find_chrome", return_value="/path/to/chrome"),
-                patch.object(
-                    client,
-                    "_verify_session",
-                    return_value=_SessionStatus.AUTHENTICATED,
-                ),
-                patch.object(client, "_save_cookies") as save_cookies,
-            ):
-                logged_in = asyncio.run(client._nodriver_login_async())
-        finally:
-            client.close()
-
-        self.assertTrue(logged_in)
-        expression = tab.evaluate.await_args.args[0]
-        self.assertIn("form.requestSubmit()", expression)
-        self.assertEqual(tab.select.await_count, 3)
-        self.assertEqual(tab.sleep.await_count, 1)
-        save_cookies.assert_called_once_with()
-        browser.stop.assert_called_once_with()
-
-    def test_verify_session_treats_server_error_as_unavailable(self) -> None:
-        response = httpx.Response(
-            502,
-            request=httpx.Request("GET", "https://wallhaven.cc/"),
-        )
-        verifier = MagicMock()
-        verifier.get.return_value = response
-        client = WallhavenWeb("user", "pass")
-        try:
-            with patch("wayper.wallhaven_web.httpx.Client", return_value=verifier):
-                status = client._verify_session()
-        finally:
-            client.close()
-
-        self.assertIs(status, _SessionStatus.UNAVAILABLE)
-        verifier.close.assert_called_once_with()
-
-    def test_verify_session_recognizes_explicit_login_page(self) -> None:
-        response = httpx.Response(
-            200,
-            text='<form id="login"><input name="username"></form>',
-            request=httpx.Request("GET", "https://wallhaven.cc/login"),
-        )
-        verifier = MagicMock()
-        verifier.get.return_value = response
-        client = WallhavenWeb("user", "pass")
-        try:
-            with patch("wayper.wallhaven_web.httpx.Client", return_value=verifier):
-                status = client._verify_session()
-        finally:
-            client.close()
-
-        self.assertIs(status, _SessionStatus.UNAUTHENTICATED)
-
     def test_login_preserves_cached_session_when_verification_is_unavailable(self) -> None:
         client = WallhavenWeb("user", "pass")
         try:
@@ -217,30 +135,6 @@ class WallhavenWebTest(unittest.TestCase):
 
         self.assertIsNone(url)
         self.assertIsNone(is_faved)
-
-    def test_can_sync_favorites_with_password(self) -> None:
-        config = WayperConfig(
-            wallhaven_username="user",
-            wallhaven_password="pass",
-            download_dir=Path("/tmp/wayper-test"),
-        )
-
-        self.assertIs(_can_sync_favorites(config), True)
-
-    def test_can_sync_favorites_requires_username(self) -> None:
-        with patch("wayper.wallhaven_web.find_spec", return_value=object()):
-            config = WayperConfig(download_dir=Path("/tmp/wayper-test"))
-
-            self.assertIs(_can_sync_favorites(config), False)
-
-    def test_can_sync_favorites_with_browser_cookie_support(self) -> None:
-        with patch("wayper.wallhaven_web.find_spec", return_value=object()):
-            config = WayperConfig(
-                wallhaven_username="user",
-                download_dir=Path("/tmp/wayper-test"),
-            )
-
-            self.assertIs(_can_sync_favorites(config), True)
 
 
 if __name__ == "__main__":

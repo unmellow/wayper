@@ -408,7 +408,9 @@ class WallhavenClient:
                             if not await self.download_image(url, review_dest):
                                 skipped["fail"] += 1
                                 continue
-                            save_metadata(config, filename, item, complete=True)
+                            await asyncio.to_thread(
+                                save_metadata, config, filename, item, complete=True
+                            )
                             try:
                                 prediction_payload = prediction.to_dict()
                                 decision_score = preference_decision_score(
@@ -424,7 +426,8 @@ class WallhavenClient:
                                         "trained_at": model.trained_at,
                                     }
                                 )
-                                queue_model_review_item(
+                                await asyncio.to_thread(
+                                    queue_model_review_item,
                                     config,
                                     review_dest,
                                     purity=mode,
@@ -448,7 +451,7 @@ class WallhavenClient:
                         skipped["fail"] += 1
                         continue
 
-                    save_metadata(config, filename, item, complete=True)
+                    await asyncio.to_thread(save_metadata, config, filename, item, complete=True)
                     downloaded += 1
 
         log.info(
@@ -559,7 +562,7 @@ class WallhavenClient:
                     if not await self.download_image(url, fav_dest):
                         continue
 
-                    save_metadata(config, filename, item, complete=True)
+                    await asyncio.to_thread(save_metadata, config, filename, item, complete=True)
                     page_new += 1
 
                 synced += page_new

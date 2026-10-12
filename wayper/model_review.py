@@ -13,6 +13,7 @@ import json
 import logging
 import math
 import shutil
+import threading
 import time
 from collections.abc import Iterable
 from pathlib import Path
@@ -28,6 +29,69 @@ log = logging.getLogger("wayper.model_review")
 
 MODEL_REVIEW_SCHEMA_VERSION = 1
 _STATUSES = frozenset({"pending", "keep", "ban", "filter"})
+_REVIEW_SUMMARY_CACHE_LIMIT = 8
+_review_summary_lock = threading.Lock()
+_review_summary_cache: dict[
+    Path,
+    tuple[tuple[int, int, int], tuple[dict[str, object], ...], frozenset[str]],
+] = {}
+
+
+def _review_file_token(path: Path) -> tuple[int, int, int] | None:
+    try:
+        stat = path.stat()
+    except OSError:
+        return None
+    return stat.st_mtime_ns, stat.st_size, stat.st_ino
+
+
+def _review_summary(config: WayperConfig) -> tuple[tuple[dict[str, object], ...], frozenset[str]]:
+    """Cache only count/label fields, not the evidence of every past decision."""
+    path = config.model_review_file.resolve()
+    with _review_summary_lock:
+        for _attempt in range(2):
+            token = _review_file_token(path)
+            if token is None:
+                _review_summary_cache.pop(path, None)
+                return (), frozenset()
+            cached = _review_summary_cache.get(path)
+            if cached and cached[0] == token:
+                return cached[1], cached[2]
+            try:
+                raw = json.loads(path.read_text())
+            except (OSError, ValueError):
+                return (), frozenset()
+            if (
+                not isinstance(raw, dict)
+                or raw.get("schema_version") != MODEL_REVIEW_SCHEMA_VERSION
+            ):
+                return (), frozenset()
+            items = raw.get("items")
+            if not isinstance(items, dict):
+                return (), frozenset()
+            pending: list[dict[str, object]] = []
+            filtered: set[str] = set()
+            for value in items.values():
+                if not isinstance(value, dict) or value.get("status", "pending") not in (
+                    "pending",
+                    "filter",
+                ):
+                    continue
+                record = _clean_record({key: item for key, item in value.items() if key != "model"})
+                if record is None:
+                    continue
+                if record["status"] == "pending":
+                    pending.append(record)
+                else:
+                    filtered.add(str(record["name"]))
+            if _review_file_token(path) != token:
+                continue
+            result = (tuple(pending), frozenset(filtered))
+            _review_summary_cache[path] = (token, *result)
+            while len(_review_summary_cache) > _REVIEW_SUMMARY_CACHE_LIMIT:
+                _review_summary_cache.pop(next(iter(_review_summary_cache)))
+            return result
+    return (), frozenset()
 
 
 def _empty_state() -> dict[str, object]:
@@ -162,15 +226,9 @@ def pending_model_review_count(
     active = set(purities or ALL_PURITIES) & set(ALL_PURITIES)
     if not active:
         active = {"sfw"}
-    state = load_model_review_state(config)
-    items = state.get("items", {})
-    if not isinstance(items, dict):
-        return 0
+    pending, _ = _review_summary(config)
     count = 0
-    for value in items.values():
-        record = _clean_record(value)
-        if record is None or record.get("status") != "pending":
-            continue
+    for record in pending:
         raw_path = record.get("path")
         if not isinstance(raw_path, str):
             continue
@@ -192,17 +250,8 @@ def filtered_model_review_filenames(config: WayperConfig) -> set[str]:
     These names still belong in the download blacklist, but must not become
     implicit dislike examples when the legacy preference snapshot is built.
     """
-    state = load_model_review_state(config)
-    items = state.get("items", {})
-    if not isinstance(items, dict):
-        return set()
-    return {
-        str(record["name"])
-        for value in items.values()
-        if (record := _clean_record(value)) is not None
-        and record.get("status") == "filter"
-        and isinstance(record.get("name"), str)
-    }
+    _, filtered = _review_summary(config)
+    return set(filtered)
 
 
 def list_model_review_items(

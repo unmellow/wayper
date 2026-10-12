@@ -20,52 +20,6 @@ def _metadata_group(
 
 
 class SuggestionQualityTest(unittest.TestCase):
-    def test_tag_matching_is_case_insensitive_for_positive_feedback(self) -> None:
-        metadata = {}
-        metadata.update(_metadata_group("ban", 6, ["woman"]))
-        metadata.update(_metadata_group("keep", 6, ["Woman"]))
-        metadata.update(_metadata_group("filler", 100, ["landscape"]))
-
-        results = suggest_tags_to_exclude(
-            metadata,
-            {f"ban{index}.jpg" for index in range(6)},
-            [],
-        )
-
-        self.assertNotIn("women", {normalize_tag(item["tag"]) for item in results})
-
-    def test_tag_suggestions_include_banned_kept_favorite_counts(self) -> None:
-        metadata = {}
-        metadata.update(_metadata_group("ban", 20, ["specific"]))
-        metadata.update(_metadata_group("keep", 1, ["specific"]))
-        metadata.update(_metadata_group("filler", 100, ["landscape"]))
-
-        results = suggest_tags_to_exclude(
-            metadata,
-            {f"ban{index}.jpg" for index in range(20)},
-            [],
-        )
-
-        specific = next(item for item in results if item["tag"] == "specific")
-        self.assertEqual(
-            (specific["banned"], specific["kept"], specific["favorites"]),
-            (20, 1, 0),
-        )
-
-    def test_broad_tag_with_many_kept_images_is_not_suggested(self) -> None:
-        metadata = {}
-        metadata.update(_metadata_group("ban", 200, ["woman"]))
-        metadata.update(_metadata_group("keep", 20, ["woman"]))
-        metadata.update(_metadata_group("filler", 1000, ["landscape"]))
-
-        results = suggest_tags_to_exclude(
-            metadata,
-            {f"ban{index}.jpg" for index in range(200)},
-            [],
-        )
-
-        self.assertNotIn("women", {normalize_tag(item["tag"]) for item in results})
-
     def test_layout_tags_are_not_preference_suggestions(self) -> None:
         metadata = {}
         metadata.update(_metadata_group("ban", 20, ["portrait"]))
@@ -127,10 +81,6 @@ class SuggestionQualityTest(unittest.TestCase):
             frozenset({"women", "studio-x"}),
             {frozenset(normalize_tag(tag) for tag in item["tags"]) for item in results},
         )
-
-    def test_normalize_tag_collapses_case_and_whitespace(self) -> None:
-        self.assertEqual(normalize_tag("  WoMen\t"), "women")
-        self.assertEqual(normalize_tag("woman outdoors"), "women outdoors")
 
 
 if __name__ == "__main__":

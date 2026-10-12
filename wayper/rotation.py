@@ -100,13 +100,16 @@ def update_greeter(config: WayperConfig) -> None:
 
 
 async def _download_pending(
-    client: WallhavenClient,
+    client: WallhavenClient | None,
     config: WayperConfig,
     purities: set[str],
 ) -> None:
+    owned_client = client is None
     try:
         orientations = {monitor.orientation for monitor in config.monitors}
-        if orientations and should_download(config, purities):
+        if orientations and await asyncio.to_thread(should_download, config, purities):
+            if client is None:
+                client = WallhavenClient(config)
             model_filter_context = await asyncio.to_thread(client._model_filter_context)
             await client.download_for(
                 orientations,
@@ -115,6 +118,26 @@ async def _download_pending(
             )
     except Exception as exc:
         log.warning("Background download failed: %s", exc)
+    finally:
+        if owned_client and client is not None:
+            await client.close()
+
+
+async def refill_pool(
+    config: WayperConfig,
+    purities: set[str],
+    client: WallhavenClient | None = None,
+) -> None:
+    """Run at most one refill per library, including standalone CLI processes."""
+    lock = FileLock(blocking=False, path=config.download_dir / ".download.lock")
+    try:
+        lock.__enter__()
+    except SystemExit:
+        return
+    try:
+        await _download_pending(client, config, purities)
+    finally:
+        lock.__exit__(None, None, None)
 
 
 async def _sync_favorites(client: WallhavenClient, config: WayperConfig) -> None:
@@ -150,6 +173,7 @@ class AutoRotationService:
         self._paused = False
         self._reload_requested = False
         self._config_mtime = 0
+        self._download_task: asyncio.Task[None] | None = None
 
     @property
     def running(self) -> bool:
@@ -178,6 +202,7 @@ class AutoRotationService:
         except asyncio.CancelledError:
             pass
         finally:
+            await self._stop_refill()
             self._task = None
             self._loop = None
             self._wake = None
@@ -193,6 +218,29 @@ class AutoRotationService:
     def request_reload(self) -> None:
         self._reload_requested = True
         self._notify()
+
+    def request_refill(self, config: WayperConfig) -> None:
+        """Accept hotkey requests from API threads without queuing every click."""
+        loop = self._loop
+        if loop is not None and not loop.is_closed() and not self._stopping:
+            loop.call_soon_threadsafe(self._start_refill, config)
+
+    def _start_refill(self, config: WayperConfig, client: WallhavenClient | None = None) -> None:
+        if self._stopping or (self._download_task and not self._download_task.done()):
+            return
+        self._download_task = asyncio.create_task(self._refill(config, client))
+
+    async def _refill(self, config: WayperConfig, client: WallhavenClient | None) -> None:
+        try:
+            await refill_pool(config, read_mode(config), client)
+        except Exception:
+            log.warning("Could not refill the wallpaper pool", exc_info=True)
+
+    async def _stop_refill(self) -> None:
+        if self._download_task is not None:
+            self._download_task.cancel()
+            await asyncio.gather(self._download_task, return_exceptions=True)
+            self._download_task = None
 
     def wake(self) -> None:
         self._notify()
@@ -242,6 +290,7 @@ class AutoRotationService:
         new_config = await asyncio.to_thread(self._config_loader)
         await asyncio.to_thread(ensure_directories, new_config)
         new_client = await self._prepare_client(new_config)
+        await self._stop_refill()
         await client.close()
         log.info("Automatic rotation configuration reloaded")
         return new_config, new_client, True
@@ -284,7 +333,6 @@ class AutoRotationService:
         client: WallhavenClient | None = None
         favorites_sync_count = FAVORITES_SYNC_INTERVAL
         greeter_count = 0
-        download_task: asyncio.Task[None] | None = None
         sync_task: asyncio.Task[None] | None = None
         greeter_task: asyncio.Task[None] | None = None
 
@@ -315,10 +363,7 @@ class AutoRotationService:
                 purities = read_mode(config)
                 await asyncio.to_thread(set_all_wallpapers, config, purities)
 
-                if download_task is None or download_task.done():
-                    download_task = asyncio.create_task(_download_pending(client, config, purities))
-                else:
-                    log.info("Skipping downloads because the previous batch is still running")
+                self._start_refill(config, client)
 
                 await asyncio.to_thread(enforce_quota, config)
                 await asyncio.to_thread(prune_blacklist, config)
@@ -343,10 +388,9 @@ class AutoRotationService:
         except Exception:
             log.exception("Automatic rotation service stopped unexpectedly")
         finally:
+            await self._stop_refill()
             pending = [
-                task
-                for task in (download_task, sync_task, greeter_task)
-                if task is not None and not task.done()
+                task for task in (sync_task, greeter_task) if task is not None and not task.done()
             ]
             for task in pending:
                 task.cancel()

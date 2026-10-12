@@ -35,7 +35,8 @@ class FileLock:
             flags = fcntl.LOCK_EX if self._blocking else fcntl.LOCK_EX | fcntl.LOCK_NB
             fcntl.flock(self._fd, flags)
         except OSError:
-            print("Failed to acquire lock (OSError). Exiting.")
+            if self._blocking:
+                print("Failed to acquire lock (OSError). Exiting.")
             os.close(self._fd)
             self._fd = None
             raise SystemExit(0)
@@ -70,7 +71,8 @@ class FileLock:
                         raise
                     time.sleep(0.1)
         except OSError:
-            print("Failed to acquire lock (OSError). Exiting.")
+            if self._blocking:
+                print("Failed to acquire lock (OSError). Exiting.")
             os.close(self._fd)
             self._fd = None
             raise SystemExit(0)

@@ -12,10 +12,12 @@ import sys
 import threading
 import time
 from collections.abc import Iterable
+from contextlib import nullcontext
 from pathlib import Path
 
 from .config import WayperConfig
 from .lock import FileLock
+from .pool import favorites_dir, metadata_lock_path, pool_dir
 from .preference.model import (
     _CONTEXT_FIELDS,
     _NON_PREFERENCE_FEATURE_TAGS,
@@ -88,8 +90,9 @@ from .preference.training import (
     train_preference_model,
 )
 from .process import windows_no_window_kwargs
+from .state import ALL_PURITIES
 from .tags import normalize_tag
-from .util import atomic_write
+from .util import atomic_write, prepare_atomic_write
 
 # Preserve the original module's import surface while implementation details
 # live in focused model and training modules.
@@ -906,25 +909,7 @@ def _save_manual_preference_model(
     snapshot: PreferenceTrainingSnapshot,
 ) -> bool:
     """Commit a manual fit only if its source snapshot is still current."""
-    path = preference_model_path(config)
-    path.parent.mkdir(parents=True, exist_ok=True)
-    # Keep the same lock order as automatic commits: model first, then shared
-    # state. This lets a manual train retry rather than overwrite a newer
-    # automatic fit whose feedback arrived while the manual fit was running.
-    with FileLock(path=_preference_model_lock_path(path)):
-        with FileLock():
-            current_model = load_preference_model(path)
-            current = collect_preference_training_snapshot(
-                config,
-                allow_legacy_bootstrap=current_model is None,
-            )
-            if (
-                current.data_signature != snapshot.data_signature
-                or current.label_source != snapshot.label_source
-            ):
-                return False
-            _write_preference_model_unlocked(model, path)
-            return True
+    return _commit_preference_model(config, model, snapshot, automatic=False)
 
 
 def train_and_save_local_preference_model(
@@ -1794,73 +1779,121 @@ def run_scheduled_preference_model_retrain(
             log.warning("Could not check for a follow-up preference model refresh", exc_info=True)
 
 
+def _training_state_token(config: WayperConfig) -> tuple[object, ...]:
+    """Fingerprint snapshot inputs without parsing history or scanning image files."""
+    paths = [
+        config.metadata_file,
+        config.blacklist_file,
+        config.preference_feedback_file,
+        config.preference_events_file,
+        config.model_review_file,
+        preference_historical_bans_path(config),
+    ]
+    for purity in ALL_PURITIES:
+        for orientation in ("landscape", "portrait"):
+            paths.extend(
+                (
+                    pool_dir(config, purity, orientation),
+                    favorites_dir(config, purity, orientation),
+                )
+            )
+    return (
+        int(time.time() // 86400),
+        *(_preference_model_file_version(path) for path in paths),
+    )
+
+
+def _automatic_fit_is_current(
+    current_model: PreferenceModel | None,
+    model: PreferenceModel,
+    snapshot: PreferenceTrainingSnapshot,
+) -> bool:
+    current_summary = current_model.training_summary if current_model is not None else {}
+    current_threshold = current_summary.get("decision_threshold")
+    current_calibration = current_summary.get("decision_calibration")
+    decision_boundary_current = (
+        isinstance(current_threshold, int | float)
+        and not isinstance(current_threshold, bool)
+        and math.isfinite(current_threshold)
+        and isinstance(current_calibration, dict)
+        and current_calibration.get("version") == DECISION_CALIBRATION_VERSION
+    )
+    new_calibration = model.training_summary.get("decision_calibration")
+    current_readiness = sum(
+        (
+            decision_boundary_current,
+            bool(current_model and current_model.semantic_enabled),
+            bool(current_model and current_model.neighbor_head_ready),
+            isinstance(current_calibration, dict) and current_calibration.get("available") is True,
+        )
+    )
+    new_readiness = sum(
+        (
+            model.semantic_enabled,
+            model.neighbor_head_ready,
+            isinstance(new_calibration, dict)
+            and new_calibration.get("version") == DECISION_CALIBRATION_VERSION,
+            isinstance(new_calibration, dict) and new_calibration.get("available") is True,
+        )
+    )
+    if (
+        current_model is not None
+        and current_model.schema_version == MODEL_SCHEMA_VERSION
+        and current_summary.get("training_data_signature") == snapshot.data_signature
+        and current_summary.get("label_source", "legacy") == snapshot.label_source
+        and decision_boundary_current
+        and current_readiness >= new_readiness
+    ):
+        # A manual fit (or another worker) already covered exactly the
+        # same snapshot and calibration. Preserve its hyperparameters.
+        return True
+    return False
+
+
+def _commit_preference_model(
+    config: WayperConfig,
+    model: PreferenceModel,
+    snapshot: PreferenceTrainingSnapshot,
+    *,
+    automatic: bool,
+) -> bool:
+    """Validate optimistically; hold shared state only for the final rename."""
+    path = preference_model_path(config)
+    with FileLock(path=_preference_model_lock_path(path)):
+        token = _training_state_token(config)
+        current_model = load_preference_model(path)
+        current = collect_preference_training_snapshot(
+            config,
+            allow_legacy_bootstrap=current_model is None,
+        )
+        if (
+            current.data_signature != snapshot.data_signature
+            or current.label_source != snapshot.label_source
+        ):
+            return False
+        preserve_existing = automatic and _automatic_fit_is_current(current_model, model, current)
+        staged = (
+            nullcontext(lambda: None)
+            if preserve_existing
+            else prepare_atomic_write(path, json.dumps(model.to_dict(), ensure_ascii=False) + "\n")
+        )
+        with staged as publish:
+            # Metadata writers no longer take the wallpaper lock. Acquire their
+            # lock first, so waiting for a large merge never blocks hotkeys.
+            with FileLock(path=metadata_lock_path(config)), FileLock():
+                if _training_state_token(config) != token:
+                    return False
+                publish()
+                return True
+
+
 def _save_automatic_preference_model(
     config: WayperConfig,
     model: PreferenceModel,
     snapshot: PreferenceTrainingSnapshot,
 ) -> bool:
-    """Commit only a still-current automatic fit under the model write lock.
-
-    Lock ordering is deliberately model lock then shared state lock. Manual
-    commits use the same order, so automatic and manual saves cannot race or
-    corrupt the shared temporary model file.
-    """
-    path = preference_model_path(config)
-    path.parent.mkdir(parents=True, exist_ok=True)
-    with FileLock(path=_preference_model_lock_path(path)):
-        with FileLock():
-            current_model = load_preference_model(path)
-            current = collect_preference_training_snapshot(
-                config,
-                allow_legacy_bootstrap=current_model is None,
-            )
-            if (
-                current.data_signature != snapshot.data_signature
-                or current.label_source != snapshot.label_source
-            ):
-                return False
-            current_summary = current_model.training_summary if current_model is not None else {}
-            current_threshold = current_summary.get("decision_threshold")
-            current_calibration = current_summary.get("decision_calibration")
-            decision_boundary_current = (
-                isinstance(current_threshold, int | float)
-                and not isinstance(current_threshold, bool)
-                and math.isfinite(current_threshold)
-                and isinstance(current_calibration, dict)
-                and current_calibration.get("version") == DECISION_CALIBRATION_VERSION
-            )
-            new_calibration = model.training_summary.get("decision_calibration")
-            current_readiness = sum(
-                (
-                    decision_boundary_current,
-                    bool(current_model and current_model.semantic_enabled),
-                    bool(current_model and current_model.neighbor_head_ready),
-                    isinstance(current_calibration, dict)
-                    and current_calibration.get("available") is True,
-                )
-            )
-            new_readiness = sum(
-                (
-                    model.semantic_enabled,
-                    model.neighbor_head_ready,
-                    isinstance(new_calibration, dict)
-                    and new_calibration.get("version") == DECISION_CALIBRATION_VERSION,
-                    isinstance(new_calibration, dict) and new_calibration.get("available") is True,
-                )
-            )
-            if (
-                current_model is not None
-                and current_model.schema_version == MODEL_SCHEMA_VERSION
-                and current_summary.get("training_data_signature") == current.data_signature
-                and current_summary.get("label_source", "legacy") == current.label_source
-                and decision_boundary_current
-                and current_readiness >= new_readiness
-            ):
-                # A manual fit (or another worker) already covered exactly the
-                # same snapshot and calibration. Preserve its hyperparameters.
-                return True
-            _write_preference_model_unlocked(model, path)
-            return True
+    """Commit an automatic fit without replacing an equivalent manual fit."""
+    return _commit_preference_model(config, model, snapshot, automatic=True)
 
 
 def _run_auto_retrain(config: WayperConfig) -> str:

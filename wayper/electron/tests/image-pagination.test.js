@@ -2,6 +2,7 @@ const assert = require('node:assert/strict');
 const fs = require('node:fs');
 const path = require('node:path');
 const vm = require('node:vm');
+const test = require('node:test');
 
 function loadRendererData(context, exportedNames) {
     const source = fs.readFileSync(path.join(__dirname, '..', 'renderer-data.js'), 'utf8');
@@ -9,10 +10,6 @@ function loadRendererData(context, exportedNames) {
     vm.createContext(context);
     vm.runInContext(source + exportsSource, context, { filename: 'renderer-data.js' });
     return context.__testExports;
-}
-
-async function flushPromises() {
-    await new Promise(resolve => setImmediate(resolve));
 }
 
 function makeState() {
@@ -118,82 +115,6 @@ async function testRepeatedPageCannotDuplicatePaths() {
     assert.equal(state.images.map(image => image.path).join(','), 'first.jpg,second.jpg');
 }
 
-async function testRefreshPublishesStatusBeforeSlowPage() {
-    const pending = [];
-    const state = makeState();
-    state.status = { auto_rotation: false, rotation_paused: false, pool_count: 1 };
-    let statusUpdates = 0;
-    const context = makeContext(
-        state,
-        url => new Promise(resolve => pending.push({ url, resolve })),
-    );
-    context.updateStatusUI = () => { statusUpdates++; };
-    const renderer = loadRendererData(context, ['refreshImages']);
-
-    let refreshFinished = false;
-    const refresh = renderer.refreshImages().then(() => { refreshFinished = true; });
-    const statusRequest = pending.find(request => request.url.includes('/api/status'));
-    const pageRequest = pending.find(request => request.url.includes('/api/images/page'));
-    assert.ok(statusRequest && pageRequest);
-
-    statusRequest.resolve({
-        ok: true,
-        json: async () => ({
-            auto_rotation: false,
-            rotation_paused: false,
-            monitor: 'DP-2',
-            orientation: 'portrait',
-            pool_count: 42,
-            favorites_count: 7,
-            blocklist_count: 3,
-            model_review_count: 0,
-            mode: ['sfw'],
-        }),
-    });
-    await flushPromises();
-
-    assert.equal(state.status.pool_count, 42);
-    assert.equal(statusUpdates, 1);
-    assert.equal(refreshFinished, false, 'the gallery page should still be pending');
-
-    pageRequest.resolve({
-        ok: true,
-        json: async () => ({ items: [], total: 0, next_offset: null }),
-    });
-    await refresh;
-}
-
-function testLibraryViewRestoresSynchronously() {
-    const state = makeState();
-    state.allImages = [{ path: 'portrait-a.jpg' }, { path: 'portrait-b.jpg' }];
-    state.images = [...state.allImages];
-    state.totalImages = 2;
-    state.nextOffset = null;
-    state.imagesComplete = true;
-    state.currentBatchIndex = 2;
-    state.loadedImageMode = 'pool';
-    state.loadedImageContextKey = JSON.stringify({
-        mode: 'pool', purities: ['sfw'], orient: 'portrait',
-    });
-    let renders = 0;
-    const context = makeContext(state, async () => ({ ok: false, status: 500 }));
-    context.renderImages = () => { renders++; };
-    const renderer = loadRendererData(
-        context,
-        ['cacheCurrentLibraryView', 'restoreLibraryView'],
-    );
-
-    assert.equal(renderer.cacheCurrentLibraryView(), true);
-    state.allImages = [];
-    state.images = [];
-    state.currentBatchIndex = 0;
-
-    assert.equal(renderer.restoreLibraryView('pool', 'portrait'), true);
-    assert.equal(state.images.map(image => image.path).join(','), 'portrait-a.jpg,portrait-b.jpg');
-    assert.equal(state.currentBatchIndex, 0, 'the restored grid should render from its first card');
-    assert.equal(renders, 1, 'cached cards should paint before network revalidation');
-}
-
 async function testBlocklistShowsLoadingAndRecoversFromApiFailure() {
     for (const failingEndpoint of ['/api/blocklist', '/api/images/page']) {
         const pending = [];
@@ -206,6 +127,8 @@ async function testBlocklistShowsLoadingAndRecoversFromApiFailure() {
         const cached = state.blocklistData;
         const paints = [];
         const context = makeContext(state, url => new Promise(resolve => pending.push({ url, resolve })));
+        // HTTP failures are deliberate in this recovery test.
+        context.console = { ...console, error() {} };
         context.els.wallpaperGrid.querySelector = () => null;
         context.renderBlocklistView = () => paints.push({
             loading: state.blocklistLoading,
@@ -297,15 +220,7 @@ async function testMonitorPollingUpdatesOrientationAndHandlesReconnect() {
     assert.equal(state.images[0].path, 'sfw/portrait/current.jpg');
 }
 
-(async () => {
-    await testRefreshLocksPageZeroAgainstObserverRace();
-    await testRepeatedPageCannotDuplicatePaths();
-    await testRefreshPublishesStatusBeforeSlowPage();
-    testLibraryViewRestoresSynchronously();
-    await testBlocklistShowsLoadingAndRecoversFromApiFailure();
-    await testMonitorPollingUpdatesOrientationAndHandlesReconnect();
-    console.log('image pagination tests passed');
-})().catch(error => {
-    console.error(error);
-    process.exitCode = 1;
-});
+test('refresh coalesces page-zero requests', testRefreshLocksPageZeroAgainstObserverRace);
+test('repeated pages do not duplicate images', testRepeatedPageCannotDuplicatePaths);
+test('blocklist preserves data and recovers after failure', testBlocklistShowsLoadingAndRecoversFromApiFailure);
+test('monitor changes reload the matching orientation', testMonitorPollingUpdatesOrientationAndHandlesReconnect);

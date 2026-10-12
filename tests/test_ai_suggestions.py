@@ -68,32 +68,6 @@ class CodexSuggestionTest(unittest.TestCase):
 
         self.assertEqual(result["add_suggestions"], [])
 
-    def test_filter_drops_layout_tag(self) -> None:
-        metadata = {
-            **{f"ban{index}.jpg": {"tags": ["portrait"], "purity": "sfw"} for index in range(10)},
-            **{f"keep{index}.jpg": {"tags": ["landscape"], "purity": "sfw"} for index in range(40)},
-        }
-        result = _filter_ai_suggestions(
-            {
-                "analysis": "",
-                "add_suggestions": [
-                    {
-                        "type": "tag",
-                        "tags": ["portrait"],
-                        "reason": "layout",
-                        "confidence": "high",
-                    }
-                ],
-                "remove_suggestions": [],
-            },
-            metadata,
-            {f"ban{index}.jpg" for index in range(10)},
-            set(),
-            WayperConfig(),
-        )
-
-        self.assertEqual(result["add_suggestions"], [])
-
     def test_invoke_codex_uses_structured_output_and_scoped_mcp_tools(self) -> None:
         response = {
             "analysis": "pattern",

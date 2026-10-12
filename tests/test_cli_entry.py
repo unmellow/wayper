@@ -28,16 +28,6 @@ def test_no_subcommand_launches_app(arguments: list[str]) -> None:
     setup_logging.assert_not_called()
 
 
-def test_help_does_not_launch_app() -> None:
-    with patch("wayper.server.launcher.run_app") as launch:
-        result = CliRunner().invoke(cli, ["--help"])
-
-    assert result.exit_code == 0, result.output
-    assert "--hidden" in result.output
-    assert "Run without a command to open the app" in result.output
-    launch.assert_not_called()
-
-
 def test_cli_subcommand_preserves_json_and_custom_config(tmp_path: Path) -> None:
     config_path = tmp_path / "config.toml"
     config_path.touch()

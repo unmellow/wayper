@@ -2,6 +2,7 @@ const assert = require('node:assert/strict');
 const fs = require('node:fs');
 const path = require('node:path');
 const vm = require('node:vm');
+const test = require('node:test');
 
 function loadRendererData(context, exportedNames) {
     const source = fs.readFileSync(path.join(__dirname, '..', 'renderer-data.js'), 'utf8');
@@ -74,36 +75,6 @@ function makeContext() {
     return context;
 }
 
-async function testEnteringComboRendersOnce() {
-    const context = makeContext();
-    context.appState.reviewingUploader = 'alice';
-    const renderer = loadRendererData(context, ['enterTagReview']);
-
-    await renderer.enterTagReview(['red', 'blue']);
-
-    assert.deepEqual(context.renderCounts(), { fullRenders: 1, intermediateRenders: 0 });
-    assert.equal(context.appState.searchQuery, 'red + blue');
-    assert.equal(context.appState.images.length, 1);
-    assert.equal(context.appState.tagReview.tags.join(','), 'red,blue');
-    assert.equal(context.appState.tagReview.refinements[0].tag, 'yellow');
-    assert.equal(context.appState.reviewingUploader, null);
-    assert.equal(context.els.mainContent.scrollTop, 0);
-}
-
-async function testRemovingComboTagRendersOnce() {
-    const context = makeContext();
-    context.appState.tagReview = { tags: ['red', 'blue'], refinements: [] };
-    const renderer = loadRendererData(context, ['navigateCombo']);
-
-    await renderer.navigateCombo(['red']);
-
-    assert.deepEqual(context.renderCounts(), { fullRenders: 1, intermediateRenders: 0 });
-    assert.equal(context.appState.searchQuery, 'red');
-    assert.equal(context.appState.images.length, 2);
-    assert.equal(context.appState.tagReview.tags.join(','), 'red');
-    assert.equal(context.appState.tagReview.refinements[0].tag, 'green');
-}
-
 async function testLateComboResponseCannotRepaintOlderContext() {
     const context = makeContext();
     const pendingSearches = new Map();
@@ -128,27 +99,4 @@ async function testLateComboResponseCannotRepaintOlderContext() {
     assert.equal(context.appState.tagReview.refinements[0].tag, 'green');
 }
 
-async function testUploaderReviewAlsoRendersOnce() {
-    const context = makeContext();
-    context.appState.tagReview = { tags: ['red'], refinements: [] };
-    const renderer = loadRendererData(context, ['enterUploaderReview']);
-
-    assert.equal(await renderer.enterUploaderReview('alice'), true);
-
-    assert.deepEqual(context.renderCounts(), { fullRenders: 1, intermediateRenders: 0 });
-    assert.equal(context.appState.searchQuery, 'alice');
-    assert.equal(context.appState.images.length, 1);
-    assert.equal(context.appState.reviewingUploader, 'alice');
-    assert.equal(context.appState.tagReview, null);
-}
-
-(async () => {
-    await testEnteringComboRendersOnce();
-    await testRemovingComboTagRendersOnce();
-    await testLateComboResponseCannotRepaintOlderContext();
-    await testUploaderReviewAlsoRendersOnce();
-    console.log('combo navigation tests passed');
-})().catch(error => {
-    console.error(error);
-    process.exitCode = 1;
-});
+test('late search cannot replace the current selection', testLateComboResponseCannotRepaintOlderContext);

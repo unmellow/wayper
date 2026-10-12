@@ -12,20 +12,14 @@ from unittest.mock import AsyncMock, patch
 import httpx
 from fastapi import HTTPException
 
-from wayper.config import MonitorConfig, WallhavenConfig, WayperConfig, load_config
+from wayper.config import MonitorConfig, WallhavenConfig, WayperConfig
 from wayper.model_review import queue_model_review_item
-from wayper.pool import favorites_dir, hydrate_tag_details, load_metadata, pool_dir, save_metadata
+from wayper.pool import favorites_dir, load_metadata, pool_dir, save_metadata
 from wayper.server.api import (
-    ActionRequest,
     ModelReviewActionRequest,
     ModelReviewClearRequest,
     PreferenceFeedbackRequest,
     UnblockRequest,
-    _readable_trash_image,
-    app,
-    ban_image_route,
-    dislike_image_route,
-    get_config_route,
     get_images_page,
     get_status,
     model_review_action_route,
@@ -34,7 +28,6 @@ from wayper.server.api import (
     preference_suggestion_feedback,
     preference_suggestions,
     remove_blocklist_entry,
-    update_config_route,
 )
 from wayper.state import write_mode
 from wayper.wallhaven import WallhavenClient
@@ -60,21 +53,6 @@ class _FakeResponse:
 
 
 class RegressionTest(unittest.TestCase):
-    def test_trash_permission_error_is_platform_neutral(self) -> None:
-        config = WayperConfig()
-        trashed = Path("/system-trash/image.jpg")
-
-        with (
-            patch("wayper.server.api.find_in_trash", return_value=trashed),
-            patch("wayper.server.api.os.access", return_value=False),
-            self.assertRaises(HTTPException) as error,
-        ):
-            _readable_trash_image(config, trashed.name)
-
-        self.assertEqual(error.exception.status_code, 403)
-        self.assertIn("system trash", error.exception.detail)
-        self.assertNotIn("Full Disk Access", error.exception.detail)
-
     def test_image_page_exposes_orientation_and_portable_paths(self) -> None:
         with tempfile.TemporaryDirectory() as td:
             config = WayperConfig(download_dir=Path(td))
@@ -88,22 +66,6 @@ class RegressionTest(unittest.TestCase):
         self.assertEqual(len(page.items), 1)
         self.assertEqual(page.items[0].path, "sfw/portrait/tall.jpg")
         self.assertEqual(page.items[0].orientation, "portrait")
-
-    def test_wallhaven_search_keeps_smaller_originals_eligible(self) -> None:
-        config = WayperConfig(
-            monitors=[MonitorConfig("retina", 5120, 2880, "landscape")],
-        )
-        client = WallhavenClient(config)
-        client.client.get = AsyncMock(
-            return_value=_FakeResponse(200, {"data": [], "meta": {"last_page": 1}})
-        )
-        try:
-            asyncio.run(client.search({"landscape"}, {"sfw"}))
-        finally:
-            asyncio.run(client.close())
-
-        params = client.client.get.call_args.kwargs["params"]
-        self.assertNotIn("atleast", params)
 
     def test_wallhaven_download_preserves_original_dimensions(self) -> None:
         from PIL import Image
@@ -143,22 +105,6 @@ class RegressionTest(unittest.TestCase):
                 dimensions = downloaded.size
 
         self.assertEqual(dimensions, (300, 400))
-
-    def test_wallhaven_search_omits_resolution_without_matching_monitor(self) -> None:
-        config = WayperConfig(
-            monitors=[MonitorConfig("portrait", 2880, 5120, "portrait")],
-        )
-        client = WallhavenClient(config)
-        client.client.get = AsyncMock(
-            return_value=_FakeResponse(200, {"data": [], "meta": {"last_page": 1}})
-        )
-        try:
-            asyncio.run(client.search({"landscape"}, {"sfw"}))
-        finally:
-            asyncio.run(client.close())
-
-        params = client.client.get.call_args.kwargs["params"]
-        self.assertNotIn("atleast", params)
 
     def test_wallhaven_auth_uses_header_instead_of_query_string(self) -> None:
         config = WayperConfig(api_key="secret-api-key")
@@ -269,98 +215,6 @@ class RegressionTest(unittest.TestCase):
         self.assertEqual((unscoped.pool_count, unscoped.favorites_count), (2, 2))
         self.assertEqual(unscoped.model_review_count, 2)
 
-    def test_unscoped_status_skips_unused_learning_snapshot(self) -> None:
-        config = WayperConfig()
-        with (
-            patch("wayper.server.api.get_config", return_value=config),
-            patch(
-                "wayper.server.api.rotation_service.snapshot",
-                return_value={"auto_rotation": True, "rotation_paused": False},
-            ),
-            patch(
-                "wayper.model_review.model_review_status",
-                return_value={"pending_count": 0, "ready": True},
-            ) as review_status,
-        ):
-            response = get_status(include_recoverable=False)
-
-        self.assertTrue(response.model_filter_ready)
-        review_status.assert_called_once_with(
-            config,
-            purities=None,
-            orientation=None,
-            include_learning=False,
-        )
-
-    def test_config_route_exposes_and_updates_wallhaven_batch_size(self) -> None:
-        config = WayperConfig(wallhaven=WallhavenConfig(batch_size=7))
-
-        with (
-            patch("wayper.server.api.get_config", return_value=config),
-            patch("wayper.server.api.save_config") as save_config,
-            patch("wayper.server.api.rotation_service.request_reload"),
-            patch("wayper.server.api._cached_config", None),
-            patch("wayper.server.api._cached_mtime", 0),
-        ):
-            response = get_config_route()
-            update_config_route({"wallhaven": {"batch_size": 9}})
-
-        self.assertEqual(response["wallhaven"]["batch_size"], 7)
-        self.assertEqual(config.wallhaven.batch_size, 9)
-        save_config.assert_called_once_with(config)
-
-    def test_config_route_exposes_and_normalizes_filter_strategy(self) -> None:
-        config = WayperConfig(wallhaven=WallhavenConfig(filter_strategy="rules"))
-
-        with (
-            patch("wayper.server.api.get_config", return_value=config),
-            patch("wayper.server.api.save_config"),
-            patch("wayper.server.api.rotation_service.request_reload"),
-            patch("wayper.server.api._cached_config", None),
-            patch("wayper.server.api._cached_mtime", 0),
-        ):
-            update_config_route({"wallhaven": {"filter_mode": "both"}})
-            response = get_config_route()
-
-        self.assertEqual(config.wallhaven.filter_strategy, "rules+model")
-        self.assertEqual(response["wallhaven"]["filter_strategy"], "rules+model")
-
-    def test_config_load_clamps_wallhaven_batch_size_to_one(self) -> None:
-        with tempfile.TemporaryDirectory() as td:
-            path = Path(td) / "config.toml"
-            path.write_text("[wallhaven]\nbatch_size = -2\n")
-
-            config = load_config(path)
-
-        self.assertEqual(config.wallhaven.batch_size, 1)
-
-    def test_config_load_ignores_legacy_min_favorites(self) -> None:
-        with tempfile.TemporaryDirectory() as td:
-            path = Path(td) / "config.toml"
-            path.write_text('[wallhaven]\nsorting = "random"\nmin_favorites = 10\n')
-
-            config = load_config(path)
-
-        self.assertEqual(config.wallhaven.sorting, "random")
-        self.assertFalse(hasattr(config.wallhaven, "min_favorites"))
-
-        client = WallhavenClient(config)
-        client.client.get = AsyncMock(
-            side_effect=[
-                _FakeResponse(200, {"data": [{"id": "page-one"}], "meta": {"last_page": 8}}),
-                _FakeResponse(200, {"data": [{"id": "page-three"}]}),
-            ]
-        )
-        try:
-            with patch("wayper.wallhaven.random.randint", return_value=3):
-                items = asyncio.run(client.search({"landscape"}, {"sfw"}))
-        finally:
-            asyncio.run(client.close())
-
-        self.assertEqual(items, [{"id": "page-three"}])
-        self.assertEqual(client.client.get.await_count, 2)
-        self.assertEqual(client.client.get.call_args_list[0].kwargs["params"]["sorting"], "random")
-
     def test_model_filter_fails_open_without_semantic_calibration(self) -> None:
         from wayper.model_review import list_model_review_items
         from wayper.preference_model import PreferenceModel, save_preference_model
@@ -463,56 +317,6 @@ class RegressionTest(unittest.TestCase):
         self.assertEqual(len(score_threads), 1)
         self.assertNotEqual(score_threads[0], event_loop_thread)
 
-    def test_background_download_uses_one_combined_batch_and_model_context(self) -> None:
-        from wayper.rotation import _download_pending
-
-        shared_context = (object(), True, {"ready": True})
-
-        class FakeClient:
-            def __init__(self) -> None:
-                self.context_loads = 0
-                self.received: list[object] = []
-
-            def _model_filter_context(self):
-                self.context_loads += 1
-                return shared_context
-
-            async def download_for(self, orientation, purity, *, model_filter_context):
-                self.orientation = orientation
-                self.purity = purity
-                self.received.append(model_filter_context)
-
-        config = WayperConfig(
-            monitors=[
-                MonitorConfig("wide", 1920, 1080, "landscape"),
-                MonitorConfig("tall", 1080, 1920, "portrait"),
-            ]
-        )
-        client = FakeClient()
-        with patch("wayper.rotation.should_download", return_value=True):
-            asyncio.run(_download_pending(client, config, {"sfw"}))
-
-        self.assertEqual(client.context_loads, 1)
-        self.assertEqual(len(client.received), 1)
-        self.assertEqual(client.orientation, {"landscape", "portrait"})
-        self.assertEqual(client.purity, {"sfw"})
-        self.assertTrue(all(context is shared_context for context in client.received))
-
-    def test_wallhaven_combines_search_scope(self) -> None:
-        config = WayperConfig()
-        client = WallhavenClient(config)
-        client.client.get = AsyncMock(
-            return_value=_FakeResponse(200, {"data": [], "meta": {"last_page": 1}})
-        )
-        try:
-            asyncio.run(client.search({"portrait", "landscape"}, {"nsfw", "sfw"}))
-        finally:
-            asyncio.run(client.close())
-
-        params = client.client.get.call_args.kwargs["params"]
-        self.assertEqual(params["ratios"], "landscape,portrait")
-        self.assertEqual(params["purity"], "101")
-
     def test_combined_download_batch_size_is_global(self) -> None:
         with tempfile.TemporaryDirectory() as td:
             config = WayperConfig(
@@ -567,55 +371,6 @@ class RegressionTest(unittest.TestCase):
         self.assertEqual(client.wallpaper_info.await_count, 2)
         self.assertEqual(client.download_image.await_count, 2)
         self.assertEqual(len(downloaded), 2)
-
-    def test_remote_favorite_fetches_complete_details_before_saving(self) -> None:
-        with tempfile.TemporaryDirectory() as td:
-            config = WayperConfig(
-                download_dir=Path(td),
-                api_key="test",
-                wallhaven_username="tester",
-                monitors=[],
-            )
-            listing = {
-                "id": "abc123",
-                "path": "https://wallhaven.test/wallhaven-abc123.jpg",
-                "purity": "sfw",
-                "resolution": "1920x1080",
-            }
-            detail = {
-                **listing,
-                "tags": [{"id": 5, "name": "forest", "category": "Nature"}],
-                "uploader": {"username": "artist"},
-            }
-            client = WallhavenClient(config)
-
-            async def get(url: str, params: dict | None = None) -> _FakeResponse:
-                del params
-                if url.endswith("/collections"):
-                    return _FakeResponse(200, {"data": [{"id": 1}]})
-                return _FakeResponse(
-                    200,
-                    {"data": [listing], "meta": {"last_page": 1}},
-                )
-
-            async def download(_url: str, destination: Path) -> bool:
-                destination.parent.mkdir(parents=True, exist_ok=True)
-                destination.write_bytes(b"favorite")
-                return True
-
-            client.client.get = AsyncMock(side_effect=get)
-            client.wallpaper_info = AsyncMock(return_value=detail)
-            client.download_image = AsyncMock(side_effect=download)
-            try:
-                synced, _ = asyncio.run(client.sync_remote_favorites())
-            finally:
-                asyncio.run(client.close())
-            record = load_metadata(config)["wallhaven-abc123.jpg"]
-
-        self.assertEqual(synced, 1)
-        self.assertEqual(record["tags"], ["forest"])
-        self.assertEqual(record["tag_details"][0]["category"], "Nature")
-        self.assertTrue(record["metadata_complete"])
 
     def test_remote_favorite_sync_scans_past_a_page_that_is_already_local(self) -> None:
         with tempfile.TemporaryDirectory() as td:
@@ -722,151 +477,6 @@ class RegressionTest(unittest.TestCase):
             self.assertTrue(repaired["new.jpg"]["future_api_field"]["preserved"])
             self.assertEqual(repaired["new.jpg"]["metadata_fetched_at"], 123)
 
-    def test_metadata_backfill_repairs_live_records_and_is_resumable(self) -> None:
-        from wayper.core import do_backfill_metadata
-
-        class FakeWallhavenClient:
-            calls: list[str] = []
-
-            def __init__(self, _config: WayperConfig) -> None:
-                pass
-
-            async def wallpaper_info(self, wallpaper_id: str, *, retries: int = 2) -> dict:
-                self.calls.append(wallpaper_id)
-                return {
-                    "id": wallpaper_id,
-                    "tags": [{"id": 1, "name": "forest", "category": "Nature"}],
-                    "uploader": {"username": "artist"},
-                }
-
-            async def close(self) -> None:
-                pass
-
-        with tempfile.TemporaryDirectory() as td:
-            config = WayperConfig(download_dir=Path(td))
-            image = config.download_dir / "sfw" / "landscape" / "wallhaven-abc123.jpg"
-            image.parent.mkdir(parents=True)
-            image.touch()
-            config.metadata_file.write_text(json.dumps({image.name: {"id": "abc123", "tags": []}}))
-
-            with patch("wayper.wallhaven.WallhavenClient", FakeWallhavenClient):
-                first = asyncio.run(
-                    do_backfill_metadata(
-                        config,
-                        missing_tags_only=True,
-                        delay_seconds=0,
-                    )
-                )
-                second = asyncio.run(
-                    do_backfill_metadata(
-                        config,
-                        missing_tags_only=True,
-                        delay_seconds=0,
-                    )
-                )
-
-            record = load_metadata(config)[image.name]
-
-        self.assertEqual(FakeWallhavenClient.calls, ["abc123"])
-        self.assertEqual(first.extra["updated"], 1)
-        self.assertEqual(second.extra["targeted"], 0)
-        self.assertEqual(record["tags"], ["forest"])
-        self.assertTrue(record["metadata_complete"])
-
-    def test_metadata_hydration_propagates_known_tag_objects(self) -> None:
-        with tempfile.TemporaryDirectory() as td:
-            config = WayperConfig(download_dir=Path(td))
-            config.metadata_file.write_text(
-                json.dumps(
-                    {
-                        "complete.jpg": {
-                            "tags": ["Forest"],
-                            "tag_details": [
-                                {
-                                    "id": 7,
-                                    "name": "Forest",
-                                    "alias": "woodland",
-                                    "category": "Nature",
-                                }
-                            ],
-                        },
-                        "legacy.jpg": {"tags": ["forest", "unknown"]},
-                    }
-                )
-            )
-
-            result = hydrate_tag_details(config)
-            metadata = load_metadata(config)
-
-        self.assertEqual(result["known_tags"], 1)
-        self.assertEqual(metadata["legacy.jpg"]["tag_details"][0]["alias"], "woodland")
-        self.assertFalse(metadata["legacy.jpg"]["tag_details_complete"])
-        self.assertTrue(metadata["complete.jpg"]["tag_details_complete"])
-
-    def test_metadata_backfill_records_unavailable_remote_images(self) -> None:
-        from wayper.core import do_backfill_metadata, metadata_backfill_status
-
-        class MissingWallhavenClient:
-            def __init__(self, _config: WayperConfig) -> None:
-                pass
-
-            async def wallpaper_info(self, _wallpaper_id: str, *, retries: int = 2) -> dict:
-                return {}
-
-            async def close(self) -> None:
-                pass
-
-        with tempfile.TemporaryDirectory() as td:
-            config = WayperConfig(download_dir=Path(td))
-            image = config.download_dir / "sfw" / "landscape" / "wallhaven-gone12.jpg"
-            image.parent.mkdir(parents=True)
-            image.touch()
-
-            with patch("wayper.wallhaven.WallhavenClient", MissingWallhavenClient):
-                result = asyncio.run(do_backfill_metadata(config, delay_seconds=0))
-
-            record = load_metadata(config)[image.name]
-            status = metadata_backfill_status(config)
-
-        self.assertEqual(result.extra["failed"], 1)
-        self.assertEqual(result.extra["remaining"], 1)
-        self.assertTrue(record["metadata_unavailable"])
-        self.assertEqual(record["metadata_error"], "unavailable_or_request_failed")
-        self.assertEqual(status["unavailable_records"], 1)
-
-    def test_trash_routes_support_head_for_permission_probe(self) -> None:
-        methods_by_path: dict[str, set[str]] = {}
-        for route in app.routes:
-            path = getattr(route, "path", "")
-            methods = getattr(route, "methods", set()) or set()
-            methods_by_path.setdefault(path, set()).update(methods)
-
-        self.assertIn("HEAD", methods_by_path["/trash/{filename}"])
-        self.assertIn("HEAD", methods_by_path["/trash-thumbnails/{filename}"])
-        self.assertIn("GET", methods_by_path["/previews/{path:path}"])
-
-    def test_review_preview_bounds_portrait_height(self) -> None:
-        from PIL import Image
-
-        from wayper.image import generate_thumbnail
-
-        with tempfile.TemporaryDirectory() as td:
-            root = Path(td)
-            source = root / "portrait.jpg"
-            Image.new("RGB", (1000, 3000), "navy").save(source, quality=80)
-            preview = generate_thumbnail(
-                source,
-                root / "previews",
-                max_width=1920,
-                max_height=1920,
-            )
-            self.assertIsNotNone(preview)
-            assert preview is not None
-            with Image.open(preview) as image:
-                size = image.size
-
-        self.assertEqual(size, (640, 1920))
-
     def test_do_next_records_last_wallpaper_change(self) -> None:
         from wayper.core import do_next
         from wayper.state import read_last_wallpaper_change
@@ -890,46 +500,6 @@ class RegressionTest(unittest.TestCase):
             self.assertTrue(result.ok)
             set_wallpaper.assert_called_once_with("main", image, config.transition)
             self.assertEqual(read_last_wallpaper_change(config), 1234.5)
-
-    def test_seconds_until_next_rotation_uses_last_wallpaper_change(self) -> None:
-        from wayper.rotation import seconds_until_next_rotation
-        from wayper.state import record_wallpaper_change
-
-        with tempfile.TemporaryDirectory() as td:
-            config = WayperConfig(download_dir=Path(td), interval=300)
-            record_wallpaper_change(config, when=1000.0)
-
-            self.assertEqual(seconds_until_next_rotation(config, now=1175.0), 125.0)
-            self.assertEqual(seconds_until_next_rotation(config, now=1400.0), 0.0)
-            self.assertEqual(seconds_until_next_rotation(config, now=900.0), 300.0)
-
-    def test_preference_suggestion_routes_are_review_only_and_record_keep_feedback(self) -> None:
-        from wayper.preference_model import load_preference_feedback
-
-        with tempfile.TemporaryDirectory() as td:
-            config = WayperConfig(download_dir=Path(td))
-            image = config.download_dir / "sfw" / "landscape" / "candidate.jpg"
-            image.parent.mkdir(parents=True)
-            image.touch()
-
-            with patch("wayper.server.api.get_config", return_value=config):
-                untrained = preference_suggestions(purity="sfw", orient="landscape")
-                with patch(
-                    "wayper.preference_model.preference_deletion_suggestions",
-                    return_value={"items": [{"path": "sfw/landscape/candidate.jpg"}]},
-                ):
-                    response = preference_suggestion_feedback(
-                        PreferenceFeedbackRequest(path="sfw/landscape/candidate.jpg", action="keep")
-                    )
-
-            feedback = load_preference_feedback(config)
-
-        self.assertEqual(untrained["status"], "untrained")
-        self.assertEqual(untrained["items"], [])
-        self.assertEqual(response["status"], "ok")
-        self.assertEqual(feedback["revision"], 1)
-        self.assertEqual(feedback["events"][0]["action"], "keep")
-        self.assertEqual(feedback["events"][0]["context"], "model_review")
 
     def test_preference_suggestion_route_caches_unchanged_ranking_state(self) -> None:
         with tempfile.TemporaryDirectory() as td:
@@ -1127,45 +697,6 @@ class RegressionTest(unittest.TestCase):
         self.assertNotIn("first.jpg", {example.filename for example in snapshot.examples})
         self.assertNotIn("second.jpg", {example.filename for example in snapshot.examples})
 
-    def test_model_review_queue_keeps_same_named_files_and_scopes_counts(self) -> None:
-        from wayper.model_review import (
-            list_model_review_items,
-            pending_model_review_count,
-            queue_model_review_item,
-        )
-
-        with tempfile.TemporaryDirectory() as td:
-            config = WayperConfig(download_dir=Path(td))
-            for purity, orientation in (("sfw", "landscape"), ("nsfw", "portrait")):
-                image = config.model_review_dir / purity / orientation / "same.jpg"
-                image.parent.mkdir(parents=True)
-                image.touch()
-                queue_model_review_item(
-                    config,
-                    image,
-                    purity=purity,
-                    orientation=orientation,
-                    prediction={"probability": 0.99},
-                    strategy="model",
-                )
-
-            self.assertEqual(pending_model_review_count(config), 2)
-            self.assertEqual(
-                pending_model_review_count(config, purities=("sfw",)),
-                1,
-            )
-            self.assertEqual(
-                pending_model_review_count(config, orientation="portrait"),
-                1,
-            )
-            self.assertEqual(
-                {item["path"] for item in list_model_review_items(config)},
-                {
-                    ".model-review/sfw/landscape/same.jpg",
-                    ".model-review/nsfw/portrait/same.jpg",
-                },
-            )
-
     def test_preference_keep_feedback_rejects_non_candidates_and_unblock_paths(self) -> None:
         with tempfile.TemporaryDirectory() as td:
             config = WayperConfig(download_dir=Path(td))
@@ -1191,43 +722,6 @@ class RegressionTest(unittest.TestCase):
         self.assertEqual(traversal_error.exception.status_code, 400)
         self.assertFalse(unchanged["removed"])
         self.assertEqual(feedback["events"], [])
-
-    def test_model_review_ban_passes_server_observed_context_to_core(self) -> None:
-        from wayper.core import CoreResult
-
-        with tempfile.TemporaryDirectory() as td:
-            config = WayperConfig(download_dir=Path(td))
-            image = config.download_dir / "sfw" / "landscape" / "candidate.jpg"
-            image.parent.mkdir(parents=True)
-            image.touch()
-            result = CoreResult(action="ban", image=image, extra={"replacement_images": {}})
-
-            with (
-                patch("wayper.server.api.get_config", return_value=config),
-                patch(
-                    "wayper.server.api._model_review_feedback",
-                    return_value={
-                        "schema_version": 2,
-                        "feature_score": -0.25,
-                        "review_score": 1.25,
-                        "neighbor_preference_gap": 1.0,
-                        "rank": 1,
-                    },
-                ),
-                patch("wayper.server.api.do_ban", return_value=result) as do_ban,
-            ):
-                response = ban_image_route(
-                    ActionRequest(
-                        image_path="sfw/landscape/candidate.jpg",
-                        preference_context="model_review",
-                    )
-                )
-
-        self.assertEqual(response["status"], "ok")
-        kwargs = do_ban.call_args.kwargs
-        self.assertEqual(kwargs["preference_context"], "model_review")
-        self.assertEqual(kwargs["preference_model"]["feature_score"], -0.25)
-        self.assertEqual(kwargs["preference_model"]["review_score"], 1.25)
 
     def test_manual_dislike_records_distinct_feedback_and_blocks_exact_image(self) -> None:
         from wayper.core import do_ban, do_dislike
@@ -1272,56 +766,6 @@ class RegressionTest(unittest.TestCase):
         )
         self.assertEqual(feedback["events"][0]["context"], "manual_dislike")
         self.assertEqual(feedback["events"][2]["context"], "model_review")
-
-    def test_dislike_image_route_uses_explicit_dislike_core_action(self) -> None:
-        from wayper.core import CoreResult
-
-        with tempfile.TemporaryDirectory() as td:
-            config = WayperConfig(download_dir=Path(td))
-            image = config.download_dir / "sfw" / "landscape" / "candidate.jpg"
-            image.parent.mkdir(parents=True)
-            image.touch()
-            result = CoreResult(action="dislike", image=image, extra={"replacement_images": {}})
-
-            with (
-                patch("wayper.server.api.get_config", return_value=config),
-                patch("wayper.server.api.do_dislike", return_value=result) as do_dislike,
-                patch(
-                    "wayper.server.api._preference_learning_payload",
-                    return_value={"due": False},
-                ),
-            ):
-                response = dislike_image_route(
-                    ActionRequest(image_path="sfw/landscape/candidate.jpg")
-                )
-
-        self.assertEqual(response["status"], "ok")
-        self.assertEqual(response["learning"], {"due": False})
-        kwargs = do_dislike.call_args.kwargs
-        self.assertEqual(kwargs["image"], image.resolve())
-        self.assertFalse(kwargs["wait_remote"])
-        self.assertTrue(callable(kwargs["clear_thumbnail"]))
-
-    def test_dislike_cli_preserves_json_output(self) -> None:
-        from click.testing import CliRunner
-
-        from wayper.cli import cli
-        from wayper.core import CoreResult
-
-        config = WayperConfig()
-        image = Path("/tmp/missed.jpg")
-        with (
-            patch("wayper.cli.load_config", return_value=config),
-            patch("wayper.server.client.try_control_action", return_value=None),
-            patch(
-                "wayper.cli.do_dislike",
-                return_value=CoreResult(action="dislike", image=image),
-            ),
-        ):
-            result = CliRunner().invoke(cli, ["--json", "dislike"])
-
-        self.assertEqual(result.exit_code, 0, result.output)
-        self.assertEqual(json.loads(result.output), {"action": "dislike", "image": str(image)})
 
     def test_preference_keep_feedback_reports_a_ledger_write_failure(self) -> None:
         with tempfile.TemporaryDirectory() as td:

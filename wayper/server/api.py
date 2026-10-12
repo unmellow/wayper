@@ -956,6 +956,9 @@ def control_action(
     if not result.ok:
         raise HTTPException(400, result.error)
 
+    if action == "next":
+        rotation_service.request_refill(config)
+
     response = {"status": result.status or "ok"}
     if result.image:
         response["image"] = str(result.image)

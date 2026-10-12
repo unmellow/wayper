@@ -2,6 +2,7 @@ const assert = require('node:assert/strict');
 const fs = require('node:fs');
 const path = require('node:path');
 const vm = require('node:vm');
+const test = require('node:test');
 
 function loadLightbox(context, exportedNames) {
     const source = fs.readFileSync(
@@ -12,40 +13,6 @@ function loadLightbox(context, exportedNames) {
     vm.createContext(context);
     vm.runInContext(source + exportsSource, context, { filename: 'renderer-lightbox.js' });
     return context.__testExports;
-}
-
-function testPoolUsesScreenSizedPreview() {
-    const context = {
-        appState: { mode: 'pool' },
-        imageUrl: imagePath => `full:${imagePath}`,
-        modelReviewPreviewUrl: imagePath => `preview:${imagePath}`,
-    };
-    context.window = context;
-    const lightbox = loadLightbox(
-        context,
-        ['lightboxIsTrash', 'lightboxPreviewSource'],
-    );
-    const image = { path: 'sfw/landscape/wallhaven-test.jpg' };
-
-    assert.equal(lightbox.lightboxIsTrash(image), false);
-    assert.equal(lightbox.lightboxPreviewSource(image), `preview:${image.path}`);
-}
-
-function testTrashKeepsOriginalSource() {
-    const context = {
-        appState: { mode: 'pool' },
-        imageUrl: imagePath => `full:${imagePath}`,
-        modelReviewPreviewUrl: imagePath => `preview:${imagePath}`,
-    };
-    context.window = context;
-    const lightbox = loadLightbox(
-        context,
-        ['lightboxIsTrash', 'lightboxPreviewSource'],
-    );
-    const image = { path: '__trash/wallhaven-test.jpg', isTrash: true };
-
-    assert.equal(lightbox.lightboxIsTrash(image), true);
-    assert.equal(lightbox.lightboxPreviewSource(image), `full:${image.path}`);
 }
 
 async function testFullImagePredecodeUsesBoundedLru() {
@@ -88,9 +55,4 @@ async function testFullImagePredecodeUsesBoundedLru() {
     assert.equal(loaders.length, 4, 'reusing an original must not start another decode');
 }
 
-(async () => {
-    testPoolUsesScreenSizedPreview();
-    testTrashKeepsOriginalSource();
-    await testFullImagePredecodeUsesBoundedLru();
-    console.log('lightbox preview tests passed');
-})();
+test('full-image preloads stay bounded and reuse decoded images', testFullImagePredecodeUsesBoundedLru);

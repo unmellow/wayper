@@ -22,7 +22,6 @@ from .core import (
     do_unfav,
     metadata_backfill_status,
 )
-from .pool import should_download
 from .state import ALL_PURITIES, read_mode, toggle_base, toggle_purity, write_mode
 from .status import status_snapshot
 
@@ -38,15 +37,27 @@ def _require_success(result, use_json: bool) -> None:
     raise SystemExit(1)
 
 
-def _desktop_action(ctx, action: str, **kwargs):
-    """Reuse the desktop service for hotkeys; preserve standalone/custom CLI use."""
+def _try_desktop_action(ctx, action: str, **kwargs):
+    """Return None only when a desktop hand-off was not submitted."""
     if ctx.obj["config_path"] is None:
         from .server.client import try_control_action
 
-        result = try_control_action(ctx.obj["config"], action, **kwargs)
-        if result is not None:
-            return result
-    handler = {"fav": do_fav, "unfav": do_unfav, "ban": do_ban, "dislike": do_dislike}[action]
+        return try_control_action(ctx.obj["config"], action, **kwargs)
+    return None
+
+
+def _desktop_action(ctx, action: str, **kwargs):
+    """Reuse the desktop service for hotkeys; preserve standalone/custom CLI use."""
+    result = _try_desktop_action(ctx, action, **kwargs)
+    if result is not None:
+        return result
+    handler = {
+        "fav": do_fav,
+        "unfav": do_unfav,
+        "ban": do_ban,
+        "dislike": do_dislike,
+        "prev": do_prev,
+    }[action]
     return handler(ctx.obj["config"], **kwargs)
 
 
@@ -114,7 +125,10 @@ def next_cmd(ctx):
     config = ctx.obj["config"]
     use_json = ctx.obj["json"]
 
-    result = do_next(config)
+    result = _try_desktop_action(ctx, "next")
+    desktop_handled = result is not None
+    if result is None:
+        result = do_next(config)
     _require_success(result, use_json)
 
     if use_json:
@@ -123,31 +137,19 @@ def next_cmd(ctx):
     else:
         notify("Wallpaper", "Next wallpaper")
 
-    # Refill the pool after a manual change using the same policy as auto rotation.
-    purities = read_mode(config)
-    if should_download(config, purities):
-        from .wallhaven import WallhavenClient
+    if not desktop_handled:
+        from .rotation import refill_pool
 
-        async def _download():
-            client = WallhavenClient(config)
-            try:
-                orientations = {monitor.orientation for monitor in config.monitors}
-                if orientations:
-                    await client.download_for(orientations, purities)
-            finally:
-                await client.close()
-
-        asyncio.run(_download())
+        asyncio.run(refill_pool(config, read_mode(config)))
 
 
 @cli.command("prev")
 @click.pass_context
 def prev_cmd(ctx):
     """Go back to the previous wallpaper."""
-    config = ctx.obj["config"]
     use_json = ctx.obj["json"]
 
-    result = do_prev(config)
+    result = _desktop_action(ctx, "prev")
     _require_success(result, use_json)
 
     if result.status == "at_oldest":

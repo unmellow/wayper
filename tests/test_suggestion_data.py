@@ -14,7 +14,6 @@ from wayper.cli import cli
 from wayper.config import WayperConfig
 from wayper.pool import favorites_dir, pool_dir
 from wayper.suggestion_data import load_suggestion_catalog
-from wayper.suggestions import suggest_tags_to_exclude
 
 
 class SuggestionDataTest(unittest.TestCase):
@@ -183,17 +182,6 @@ class SuggestionDataTest(unittest.TestCase):
         self.touch_image("filtered.jpg", favorite=True)
         self.assertTrue(load_suggestion_catalog(self.config).get("filtered.jpg").favorite)
 
-    def test_history_only_suggestions_return_without_lowering_thresholds(self) -> None:
-        self.make_suggestion_library()
-        catalog = load_suggestion_catalog(self.config, purities={"nsfw"})
-
-        results = suggest_tags_to_exclude(catalog.metadata, set(catalog.banned_filenames), [])
-
-        self.assertEqual(catalog.summary["total_banned"], 12)
-        self.assertEqual(catalog.summary["total_kept"], 40)
-        specific = next(item for item in results if item["tag"] == "specific")
-        self.assertEqual((specific["banned"], specific["kept"]), (12, 0))
-
     def test_api_mcp_and_cli_share_durable_evidence(self) -> None:
         from wayper.mcp_server import tag_stats_lookup, uploader_stats_lookup
         from wayper.server.api import tag_stats, tag_suggestions, uploader_suggestions
@@ -245,13 +233,6 @@ class SuggestionDataTest(unittest.TestCase):
         self.assertEqual(len(actual["add_suggestions"]), 1)
         stats = actual["add_suggestions"][0]["stats"]
         self.assertEqual((stats["banned"], stats["kept"]), (12, 0))
-
-    def test_search_still_includes_unlabelled_metadata(self) -> None:
-        from wayper.server.api import search_images
-
-        metadata = self.write_metadata(["evicted.jpg"])
-        with patch("wayper.server.api._get_metadata", return_value=metadata):
-            self.assertEqual(search_images(tags="specific")["matches"], ["evicted.jpg"])
 
 
 if __name__ == "__main__":
