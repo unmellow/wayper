@@ -10,7 +10,7 @@ function readPortFile(portFile) {
   }
 }
 
-function probeApi(port, timeout = 1000) {
+function probeApi(port, timeout = 1000, route = '/api/status') {
   return new Promise((resolve) => {
     let settled = false
     const finish = (ready) => {
@@ -22,7 +22,7 @@ function probeApi(port, timeout = 1000) {
       {
         hostname: '127.0.0.1',
         port,
-        path: '/api/status',
+        path: route,
         timeout,
       },
       (response) => {
@@ -77,6 +77,37 @@ function takeoverInProgress(takeoverFile, now = Date.now()) {
   return stat.start === start
 }
 
+function pidAlive(pid) {
+  if (!(pid > 0)) return false
+  if (process.platform === 'linux') {
+    const stat = procStat(pid)
+    return Boolean(stat) && stat.state !== 'Z' && stat.state !== 'X'
+  }
+  try {
+    process.kill(pid, 0)
+    return true
+  } catch (error) {
+    return error.code === 'EPERM'
+  }
+}
+
+// Locate the backend that replaced ``currentPort``: prefer the port recorded
+// in api.lock when its pid is alive, then api.port. Returns 0 if none answers.
+async function findReplacementPort(options = {}) {
+  const probe = options.probe ?? probeApi
+  const lock = readFields(options.lockFile)
+  const candidates = []
+  if (lock.port && pidAlive(lock.pid)) candidates.push(lock.port)
+  candidates.push(readPortFile(options.portFile))
+  for (const port of candidates) {
+    if (port > 0 && port <= 65535 && port !== options.currentPort
+        && await probe(port, options.requestTimeout ?? 1500, '/api/config')) {
+      return port
+    }
+  }
+  return 0
+}
+
 function delay(milliseconds) {
   return new Promise((resolve) => setTimeout(resolve, milliseconds))
 }
@@ -122,4 +153,11 @@ async function waitForApi(portFile, options = {}) {
   return 0
 }
 
-module.exports = { probeApi, readPortFile, takeoverInProgress, waitForApi }
+module.exports = {
+  findReplacementPort,
+  pidAlive,
+  probeApi,
+  readPortFile,
+  takeoverInProgress,
+  waitForApi,
+}
