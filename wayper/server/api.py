@@ -1850,14 +1850,79 @@ def port_file() -> Path:
     return CONFIG_DIR / "api.port"
 
 
-def _acquire_api_lock() -> FileLock | None:
-    """Own the API/rotation lifecycle, or return ``None`` for a second launch."""
-    lock = FileLock(blocking=False, path=port_file().with_suffix(".lock"))
+def _pid_is_alive(pid: int) -> bool:
+    if pid <= 0:
+        return False
     try:
-        lock.__enter__()
-    except SystemExit:
+        os.kill(pid, 0)
+    except ProcessLookupError:
+        return False
+    except PermissionError:
+        return True
+    except OSError:
+        return False
+    return True
+
+
+def _pid_is_wayper(pid: int) -> bool:
+    """Best-effort check that ``pid`` is a live wayper process."""
+    if not _pid_is_alive(pid):
+        return False
+    cmdline = Path(f"/proc/{pid}/cmdline")
+    try:
+        args = cmdline.read_bytes().replace(b"\0", b" ").decode(errors="replace")
+    except FileNotFoundError:
+        # No procfs (macOS/Windows): trust the liveness check alone.
+        return not Path("/proc/self").exists()
+    except OSError:
+        return True
+    return "wayper" in args.lower()
+
+
+def _read_lock_owner(path: Path) -> int | None:
+    """Return the PID recorded in the API lock file, if any."""
+    try:
+        text = path.read_text().strip()
+    except OSError:
         return None
-    return lock
+    first = text.split()[0] if text else ""
+    try:
+        return int(first.removeprefix("pid="))
+    except ValueError:
+        return None
+
+
+def _write_lock_owner(path: Path, port: int | None = None) -> None:
+    """Record this process (and optionally its port) in the API lock file."""
+    try:
+        content = f"{os.getpid()}" + (f" {port}" if port else "") + "\n"
+        path.write_text(content)
+    except OSError:
+        pass
+
+
+def _acquire_api_lock() -> FileLock | None:
+    """Own the API/rotation lifecycle, or return ``None`` for a second launch.
+
+    A lock file whose recorded owner is no longer a live wayper process is
+    treated as stale: it is removed and acquisition is retried once.
+    """
+    lock_path = port_file().with_suffix(".lock")
+    for attempt in range(2):
+        lock = FileLock(blocking=False, path=lock_path)
+        try:
+            lock.__enter__()
+        except SystemExit:
+            owner = _read_lock_owner(lock_path)
+            if attempt == 0 and owner is not None and not _pid_is_wayper(owner):
+                log.warning("Removing stale API lock %s (owner pid %s)", lock_path, owner)
+                lock_path.unlink(missing_ok=True)
+                port_file().unlink(missing_ok=True)
+                continue
+            return None
+        _write_lock_owner(lock_path)
+        return lock
+    return None
 
 
 def _remove_owned_port_file(path: Path, port: int) -> None:
@@ -1888,6 +1953,7 @@ def run(stop_event: threading.Event | None = None):
         pf = port_file()
         pf.parent.mkdir(parents=True, exist_ok=True)
         pf.write_text(str(port))
+        _write_lock_owner(port_file().with_suffix(".lock"), port)
         atexit.register(_remove_owned_port_file, pf, port)
 
         log.info("API server starting on port %d", port)
