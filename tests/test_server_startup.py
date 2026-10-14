@@ -169,3 +169,145 @@ def test_lock_owner_parsing_and_liveness(tmp_path: Path) -> None:
     assert api._read_lock_owner(path) == 123
     assert api._pid_is_alive(os.getpid())
     assert not api._pid_is_alive(0)
+
+
+def _spawn_fake_wayper_owner(lock_path: Path, record: str, *, ignore_term: bool = False):
+    """Hold the API lock from a live process whose cmdline contains 'wayper'."""
+    import subprocess
+
+    code = (
+        "import fcntl, os, signal, sys, time\n"
+        "if sys.argv[3] == '1': signal.signal(signal.SIGTERM, signal.SIG_IGN)\n"
+        "fd = os.open(sys.argv[1], os.O_WRONLY | os.O_CREAT)\n"
+        "fcntl.flock(fd, fcntl.LOCK_EX)\n"
+        "st = open(f'/proc/{os.getpid()}/stat').read().rsplit(')', 1)[1].split()[19]\n"
+        "rec = sys.argv[2].replace('PID', f'pid={os.getpid()}').replace('START', f'start={st}')\n"
+        "os.ftruncate(fd, 0); os.write(fd, rec.encode())\n"
+        "print('ready', flush=True)\n"
+        "time.sleep(60)\n"
+    )
+    proc = subprocess.Popen(
+        [sys.executable, "-c", code, str(lock_path), record, "1" if ignore_term else "0", "wayper"],
+        stdout=subprocess.PIPE,
+        text=True,
+    )
+    assert proc.stdout is not None and proc.stdout.readline().strip() == "ready"
+    return proc
+
+
+def _fast_probes(monkeypatch, tmp_path: Path) -> None:
+    monkeypatch.setattr(api, "port_file", lambda: tmp_path / "api.port")
+    monkeypatch.setattr(api, "API_PROBE_ATTEMPTS", 3)
+    monkeypatch.setattr(api, "API_PROBE_INTERVAL", 0.05)
+    monkeypatch.setattr(api, "OWNER_TERM_TIMEOUT", 0.5)
+
+
+def _linux_only() -> None:
+    import pytest
+
+    if not sys.platform.startswith("linux"):
+        pytest.skip("requires /proc and flock")
+
+
+def test_hung_wayper_owner_with_dead_port_is_terminated(monkeypatch, tmp_path: Path) -> None:
+    _linux_only()
+    _fast_probes(monkeypatch, tmp_path)
+    dead_port = api._find_free_port()
+    lock_path = tmp_path / "api.lock"
+    (tmp_path / "api.port").write_text(str(dead_port))
+    proc = _spawn_fake_wayper_owner(lock_path, f"PID port={dead_port} START", ignore_term=True)
+    try:
+        lock = api._acquire_api_lock()
+        assert lock is not None
+        assert proc.wait(timeout=5) is not None  # SIGKILLed after ignoring SIGTERM
+        assert api._read_lock_owner(lock_path) == __import__("os").getpid()
+        assert not (tmp_path / "api.port").exists()
+        lock.__exit__(None, None, None)
+    finally:
+        if proc.poll() is None:
+            proc.kill()
+        proc.wait()
+
+
+def test_responsive_wayper_owner_is_reused(monkeypatch, tmp_path: Path) -> None:
+    from http.server import BaseHTTPRequestHandler, HTTPServer
+
+    _linux_only()
+    _fast_probes(monkeypatch, tmp_path)
+
+    class Handler(BaseHTTPRequestHandler):
+        def do_GET(self) -> None:
+            self.send_response(200)
+            self.end_headers()
+
+        def log_message(self, *args: object) -> None:
+            pass
+
+    server = HTTPServer(("127.0.0.1", 0), Handler)
+    threading.Thread(target=server.serve_forever, daemon=True).start()
+    port = server.server_address[1]
+    lock_path = tmp_path / "api.lock"
+    proc = _spawn_fake_wayper_owner(lock_path, f"PID port={port} START")
+    try:
+        assert api._acquire_api_lock() is None
+        assert proc.poll() is None
+    finally:
+        server.shutdown()
+        proc.kill()
+        proc.wait()
+
+
+def test_starting_wayper_owner_within_timeout_is_respected(monkeypatch, tmp_path: Path) -> None:
+    import os
+
+    _linux_only()
+    _fast_probes(monkeypatch, tmp_path)
+    lock_path = tmp_path / "api.lock"
+    proc = _spawn_fake_wayper_owner(lock_path, "PID START")
+    try:
+        assert api._acquire_api_lock() is None
+        assert proc.poll() is None
+        # Once the startup window has passed without a port, it counts as hung.
+        old = lock_path.stat().st_mtime - api.API_STARTUP_TIMEOUT - 5
+        os.utime(lock_path, (old, old))
+        lock = api._acquire_api_lock()
+        assert lock is not None
+        assert proc.wait(timeout=5) is not None
+        lock.__exit__(None, None, None)
+    finally:
+        if proc.poll() is None:
+            proc.kill()
+        proc.wait()
+
+
+def test_never_signals_unverified_pid(monkeypatch) -> None:
+    sent: list[int] = []
+    monkeypatch.setattr(api, "_pid_verified_wayper", lambda pid, start=None: False)
+    monkeypatch.setattr(api.os, "kill", lambda pid, sig: sent.append(pid))
+    assert api._terminate_hung_owner(4242, 1) is False
+    assert sent == []
+
+
+def test_start_time_mismatch_blocks_takeover(monkeypatch, tmp_path: Path) -> None:
+    _linux_only()
+    _fast_probes(monkeypatch, tmp_path)
+    dead_port = api._find_free_port()
+    lock_path = tmp_path / "api.lock"
+    proc = _spawn_fake_wayper_owner(lock_path, f"PID port={dead_port} start=1")
+    try:
+        assert api._acquire_api_lock() is None
+        assert proc.poll() is None
+    finally:
+        proc.kill()
+        proc.wait()
+
+
+def test_lock_record_includes_start_time(tmp_path: Path) -> None:
+    import os
+
+    path = tmp_path / "api.lock"
+    api._write_lock_owner(path, 5555)
+    fields = api._read_lock_fields(path)
+    assert fields["pid"] == os.getpid() and fields["port"] == 5555
+    if sys.platform.startswith("linux"):
+        assert fields["start"] == api._pid_start_time(os.getpid())
