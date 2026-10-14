@@ -220,6 +220,7 @@ def test_hung_wayper_owner_with_dead_port_is_terminated(monkeypatch, tmp_path: P
         lock = api._acquire_api_lock()
         assert lock is not None
         assert proc.wait(timeout=5) is not None  # SIGKILLed after ignoring SIGTERM
+        assert not api.takeover_file().exists()  # marker removed after takeover
         assert api._read_lock_owner(lock_path) == __import__("os").getpid()
         assert not (tmp_path / "api.port").exists()
         lock.__exit__(None, None, None)
@@ -251,6 +252,7 @@ def test_responsive_wayper_owner_is_reused(monkeypatch, tmp_path: Path) -> None:
     try:
         assert api._acquire_api_lock() is None
         assert proc.poll() is None
+        assert not api.takeover_file().exists()
     finally:
         server.shutdown()
         proc.kill()

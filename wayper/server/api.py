@@ -2033,6 +2033,47 @@ def _write_lock_owner(path: Path, port: int | None = None) -> None:
         pass
 
 
+TAKEOVER_MAX_AGE = 60.0
+
+
+def takeover_file() -> Path:
+    """Marker telling launchers a hung-backend takeover is in progress."""
+    return port_file().with_name("api.takeover")
+
+
+def _write_takeover_marker() -> None:
+    pid = os.getpid()
+    content = f"pid={pid} start={_pid_start_time(pid)} ts={int(time.time())}\n"
+    try:
+        takeover_file().write_text(content)
+    except OSError:
+        pass
+
+
+def _clear_takeover_marker() -> None:
+    """Remove the marker only if it belongs to this process."""
+    path = takeover_file()
+    if _read_lock_fields(path).get("pid") == os.getpid():
+        path.unlink(missing_ok=True)
+
+
+def takeover_in_progress(path: Path | None = None) -> bool:
+    """True if a fresh marker exists whose pid is alive with a matching start time."""
+    path = path or takeover_file()
+    fields = _read_lock_fields(path)
+    pid, start, ts = fields.get("pid"), fields.get("start"), fields.get("ts")
+    if not pid or start is None:
+        return False
+    if ts is None:
+        try:
+            ts = int(path.stat().st_mtime)
+        except OSError:
+            return False
+    if time.time() - ts > TAKEOVER_MAX_AGE:
+        return False
+    return _pid_is_alive(pid) and _pid_start_time(pid) == start
+
+
 def _acquire_api_lock() -> FileLock | None:
     """Own the API/rotation lifecycle, or return ``None`` for a second launch.
 
@@ -2056,17 +2097,32 @@ def _acquire_api_lock() -> FileLock | None:
                 return None
             if not _pid_is_wayper(owner):
                 log.warning("Removing stale API lock %s (owner pid %s)", lock_path, owner)
-            elif _owner_is_hung(lock_path, owner, port):
-                log.warning(
-                    "wayper backend pid %d is not answering (port %s); terminating it",
-                    owner,
-                    port,
-                )
-                if not _terminate_hung_owner(owner, fields.get("start")):
-                    log.warning("Could not terminate hung wayper pid %d", owner)
-                    return None
             else:
-                return None
+                # Probing (and possibly killing) the owner can outlast the GUI's
+                # normal API wait; the marker lets launchers wait longer.
+                _write_takeover_marker()
+                try:
+                    if not _owner_is_hung(lock_path, owner, port):
+                        return None
+                    log.warning(
+                        "wayper backend pid %d is not answering (port %s); terminating it",
+                        owner,
+                        port,
+                    )
+                    if not _terminate_hung_owner(owner, fields.get("start")):
+                        log.warning("Could not terminate hung wayper pid %d", owner)
+                        return None
+                    lock_path.unlink(missing_ok=True)
+                    port_file().unlink(missing_ok=True)
+                    lock = FileLock(blocking=False, path=lock_path)
+                    try:
+                        lock.__enter__()
+                    except SystemExit:
+                        return None
+                    _write_lock_owner(lock_path)
+                    return lock
+                finally:
+                    _clear_takeover_marker()
             lock_path.unlink(missing_ok=True)
             port_file().unlink(missing_ok=True)
             continue

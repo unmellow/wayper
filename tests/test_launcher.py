@@ -113,3 +113,93 @@ def test_source_launcher_stops_api_after_electron_exits(tmp_path: Path) -> None:
 
     assert api_stopped.is_set()
     command.assert_called_once_with(electron_dir, arguments=["--hidden"])
+
+
+def _marker_env(monkeypatch, tmp_path):
+    from wayper.server import api, launcher
+
+    monkeypatch.setattr(api, "port_file", lambda: tmp_path / "api.port")
+    monkeypatch.setattr(launcher, "port_file", lambda: tmp_path / "api.port")
+    monkeypatch.setattr(launcher.time, "sleep", lambda s: None)
+    return api, launcher
+
+
+def test_wait_for_api_extends_deadline_during_takeover(monkeypatch, tmp_path) -> None:
+    import os
+    import sys
+    import time as real_time
+
+    import pytest
+
+    if not sys.platform.startswith("linux"):
+        pytest.skip("requires /proc")
+    api, launcher = _marker_env(monkeypatch, tmp_path)
+    clock = [0.0]
+    monkeypatch.setattr(launcher.time, "monotonic", lambda: clock[0])
+    pid = os.getpid()
+    api.takeover_file().write_text(
+        f"pid={pid} start={api._pid_start_time(pid)} ts={int(real_time.time())}"
+    )
+    calls: list[float] = []
+
+    def fake_urlopen(url, timeout):
+        calls.append(clock[0])
+        clock[0] += 1.0
+        if clock[0] < 20:
+            raise OSError("not yet")
+        if api.takeover_file().exists():
+            api.takeover_file().unlink()  # takeover finished; extension must stick
+        if clock[0] < 22:
+            raise OSError("starting")
+
+    (tmp_path / "api.port").write_text("4321")
+    monkeypatch.setattr(launcher, "urlopen", fake_urlopen)
+    assert launcher._wait_for_api(timeout=10, max_timeout=30) == 4321
+    assert max(calls) > 10
+
+
+def test_dead_pid_takeover_marker_does_not_extend_wait(monkeypatch, tmp_path) -> None:
+    import subprocess
+    import sys
+    import time as real_time
+
+    api, launcher = _marker_env(monkeypatch, tmp_path)
+    clock = [0.0]
+    monkeypatch.setattr(launcher.time, "monotonic", lambda: clock[0])
+    dead = subprocess.run(
+        [sys.executable, "-c", "import os; print(os.getpid())"],
+        capture_output=True,
+        text=True,
+        check=True,
+    )
+    api.takeover_file().write_text(f"pid={dead.stdout.strip()} start=1 ts={int(real_time.time())}")
+    assert api.takeover_in_progress() is False
+
+    def fake_urlopen(url, timeout):
+        clock[0] += 1.0
+        raise OSError("down")
+
+    (tmp_path / "api.port").write_text("4321")
+    monkeypatch.setattr(launcher, "urlopen", fake_urlopen)
+    launcher._wait_for_api(timeout=10, max_timeout=30)
+    assert clock[0] <= 11
+
+
+def test_takeover_marker_validation(tmp_path, monkeypatch) -> None:
+    import os
+    import time as real_time
+
+    api, _ = _marker_env(monkeypatch, tmp_path)
+    pid, now = os.getpid(), int(real_time.time())
+    start = api._pid_start_time(pid)
+    path = api.takeover_file()
+    assert api.takeover_in_progress() is False
+    path.write_text(f"pid={pid} start={start} ts={now - 120}")
+    assert api.takeover_in_progress() is False  # older than 60s
+    path.write_text(f"pid={pid} start=1 ts={now}")
+    assert api.takeover_in_progress() is False  # start time mismatch (PID reuse)
+    api._write_takeover_marker()
+    if start is not None:
+        assert api.takeover_in_progress() is True
+    api._clear_takeover_marker()
+    assert not path.exists()

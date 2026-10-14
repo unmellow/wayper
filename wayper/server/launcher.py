@@ -13,7 +13,7 @@ from urllib.error import URLError
 from urllib.request import urlopen
 
 from wayper.process import windows_no_window_kwargs
-from wayper.server.api import port_file
+from wayper.server.api import port_file, takeover_in_progress
 from wayper.server.api import run as run_api
 
 
@@ -127,18 +127,47 @@ def _electron_dependencies_ready(electron_dir: Path) -> bool:
         return False
 
 
-def _wait_for_api(timeout: float = 10) -> int:
-    """Poll API port file and then the API until it responds. Returns the port."""
+TAKEOVER_WAIT_TIMEOUT = 30.0
+
+
+class _ApiDeadline:
+    """Base deadline that is extended (stickily) once a takeover is seen."""
+
+    def __init__(self, timeout: float, max_timeout: float) -> None:
+        self._start = time.monotonic()
+        self._timeout = timeout
+        self._max_timeout = max(timeout, max_timeout)
+        self._extended = False
+
+    def expired(self) -> bool:
+        now = time.monotonic()
+        if now < self._start + self._timeout:
+            return False
+        if not self._extended and takeover_in_progress():
+            self._extended = True
+        return not self._extended or now >= self._start + self._max_timeout
+
+
+def _read_port(pf: Path) -> int:
+    try:
+        return int(pf.read_text().strip())
+    except (OSError, ValueError):
+        return 0
+
+
+def _wait_for_api(timeout: float = 10, max_timeout: float = TAKEOVER_WAIT_TIMEOUT) -> int:
+    """Poll API port file and then the API until it responds. Returns the port.
+
+    The base ``timeout`` is extended up to ``max_timeout`` (total) when a
+    backend is taking over the API lock from a hung instance (``api.takeover``).
+    """
     pf = port_file()
-    deadline = time.monotonic() + timeout
+    deadline = _ApiDeadline(timeout, max_timeout)
     port = 0
-    while time.monotonic() < deadline:
-        try:
-            port = int(pf.read_text().strip())
-            if port > 0:
-                break
-        except (FileNotFoundError, ValueError):
-            pass
+    while not deadline.expired():
+        port = _read_port(pf)
+        if port > 0:
+            break
         time.sleep(0.2)
 
     if port <= 0:
@@ -148,10 +177,11 @@ def _wait_for_api(timeout: float = 10) -> int:
     # Readiness must stay cheap.  ``/api/status`` inspects the wallpaper
     # library and model-review state, so retrying it while startup is still
     # busy can stack several expensive requests in the server thread pool.
-    url = f"http://127.0.0.1:{port}/api/config"
-    while time.monotonic() < deadline:
+    # Re-read the port file each round: a takeover replaces a hung backend's port.
+    while not deadline.expired():
+        port = _read_port(pf) or port
         try:
-            urlopen(url, timeout=1)
+            urlopen(f"http://127.0.0.1:{port}/api/config", timeout=1)
             return port
         except (URLError, OSError):
             time.sleep(0.2)
