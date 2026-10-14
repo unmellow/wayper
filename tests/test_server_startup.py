@@ -97,3 +97,75 @@ def test_api_run_honors_launcher_stop_event(monkeypatch, tmp_path: Path) -> None
 
     assert not api_thread.is_alive()
     assert isinstance(captured["config"], uvicorn.Config)
+
+
+def _hold_lock_in_child(lock_path: Path, recorded_pid: str):
+    """Hold an flock on ``lock_path`` from a separate non-wayper process."""
+    import subprocess
+
+    code = (
+        "import fcntl, os, sys, time\n"
+        "fd = os.open(sys.argv[1], os.O_WRONLY | os.O_CREAT)\n"
+        "fcntl.flock(fd, fcntl.LOCK_EX)\n"
+        "os.ftruncate(fd, 0); os.write(fd, sys.argv[2].encode())\n"
+        "print('ready', flush=True)\n"
+        "time.sleep(30)\n"
+    )
+    proc = subprocess.Popen(
+        [sys.executable, "-c", code, str(lock_path), recorded_pid],
+        stdout=subprocess.PIPE,
+        text=True,
+    )
+    assert proc.stdout is not None and proc.stdout.readline().strip() == "ready"
+    return proc
+
+
+def test_stale_api_lock_with_dead_pid_is_reclaimed(monkeypatch, tmp_path: Path) -> None:
+    import pytest
+
+    if sys.platform == "win32":
+        pytest.skip("flock-based test")
+    monkeypatch.setattr(api, "port_file", lambda: tmp_path / "api.port")
+    monkeypatch.setattr(api, "_pid_is_wayper", lambda pid: False)
+    lock_path = tmp_path / "api.lock"
+    (tmp_path / "api.port").write_text("1")
+    proc = _hold_lock_in_child(lock_path, "999999 1")
+    try:
+        lock = api._acquire_api_lock()
+        assert lock is not None
+        assert api._read_lock_owner(lock_path) == __import__("os").getpid()
+        assert not (tmp_path / "api.port").exists()
+        lock.__exit__(None, None, None)
+    finally:
+        proc.kill()
+        proc.wait()
+
+
+def test_live_wayper_api_lock_is_respected(monkeypatch, tmp_path: Path) -> None:
+    import pytest
+
+    if sys.platform == "win32":
+        pytest.skip("flock-based test")
+    monkeypatch.setattr(api, "port_file", lambda: tmp_path / "api.port")
+    monkeypatch.setattr(api, "_pid_is_wayper", lambda pid: True)
+    lock_path = tmp_path / "api.lock"
+    proc = _hold_lock_in_child(lock_path, "4242 5555")
+    try:
+        assert api._acquire_api_lock() is None
+        assert lock_path.exists()
+    finally:
+        proc.kill()
+        proc.wait()
+
+
+def test_lock_owner_parsing_and_liveness(tmp_path: Path) -> None:
+    import os
+
+    path = tmp_path / "api.lock"
+    assert api._read_lock_owner(path) is None
+    path.write_text("")
+    assert api._read_lock_owner(path) is None
+    path.write_text("123 4567\n")
+    assert api._read_lock_owner(path) == 123
+    assert api._pid_is_alive(os.getpid())
+    assert not api._pid_is_alive(0)
