@@ -2,7 +2,12 @@ const { app, BrowserWindow, Menu, Tray, shell, ipcMain, dialog, screen, nativeIm
 const path = require('path')
 const { spawn } = require('child_process')
 const fs = require('fs')
-const { findReplacementPort, probeApi, waitForApi } = require('./backend-readiness')
+const {
+  findReplacementPort,
+  probeApi,
+  registerClient,
+  waitForApi,
+} = require('./backend-readiness')
 const { createStartupWindowController } = require('./startup-window')
 
 let backendProcess = null
@@ -149,6 +154,7 @@ function watchBackend() {
   const configDir = path.dirname(getPortFilePath())
   let failures = 0
   let checking = false
+  let pendingRegistration = 0
   const timer = setInterval(async () => {
     if (checking || isQuitting) return
     checking = true
@@ -156,6 +162,10 @@ function watchBackend() {
       const current = configuredApiPort()
       if (current > 0 && await probeApi(current, 1500, '/api/config')) {
         failures = 0
+        // Register with an adopted backend (retried until it succeeds).
+        if (pendingRegistration === current && await registerClient(current)) {
+          pendingRegistration = 0
+        }
         return
       }
       failures += 1
@@ -169,6 +179,7 @@ function watchBackend() {
         console.log(`Backend moved to port ${port}; reconnecting windows`)
         failures = 0
         process.env.WAYPER_API_PORT = String(port)
+        pendingRegistration = (await registerClient(port)) ? 0 : port
         backendReadyPromise = Promise.resolve(port)
         for (const win of BrowserWindow.getAllWindows()) {
           if (!win.isDestroyed()) win.webContents.reload()

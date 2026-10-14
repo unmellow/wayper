@@ -108,6 +108,36 @@ async function findReplacementPort(options = {}) {
   return 0
 }
 
+// Tell a backend which Electron main process is using it, so a backend that
+// took over from a hung one can shut down when this app exits.
+function registerClient(port, options = {}) {
+  const pid = options.pid ?? process.pid
+  const stat = procStat(pid)
+  const body = JSON.stringify({ pid, start: stat ? stat.start : null })
+  return new Promise((resolve) => {
+    const request = http.request(
+      {
+        hostname: '127.0.0.1',
+        port,
+        path: '/api/client',
+        method: 'POST',
+        headers: { 'Content-Type': 'application/json', 'Content-Length': Buffer.byteLength(body) },
+        timeout: options.timeout ?? 2000,
+      },
+      (response) => {
+        response.resume()
+        resolve(response.statusCode >= 200 && response.statusCode < 300)
+      }
+    )
+    request.on('timeout', () => {
+      request.destroy()
+      resolve(false)
+    })
+    request.on('error', () => resolve(false))
+    request.end(body)
+  })
+}
+
 function delay(milliseconds) {
   return new Promise((resolve) => setTimeout(resolve, milliseconds))
 }
@@ -158,6 +188,7 @@ module.exports = {
   pidAlive,
   probeApi,
   readPortFile,
+  registerClient,
   takeoverInProgress,
   waitForApi,
 }

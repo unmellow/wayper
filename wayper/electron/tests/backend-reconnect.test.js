@@ -58,3 +58,34 @@ run().catch((error) => {
   console.error(error)
   process.exitCode = 1
 })
+
+async function registerTests() {
+  const { registerClient } = require('../backend-readiness')
+  const received = []
+  const server = http.createServer((request, response) => {
+    let body = ''
+    request.on('data', (chunk) => { body += chunk })
+    request.on('end', () => {
+      received.push({ url: request.url, method: request.method, body: JSON.parse(body) })
+      response.writeHead(200)
+      response.end('{"ok":true}')
+    })
+  })
+  await new Promise((resolve) => server.listen(0, '127.0.0.1', resolve))
+  try {
+    assert.equal(await registerClient(server.address().port), true)
+    assert.equal(received[0].url, '/api/client')
+    assert.equal(received[0].method, 'POST')
+    assert.equal(received[0].body.pid, process.pid)
+    if (process.platform === 'linux') assert.ok(Number.isInteger(received[0].body.start))
+  } finally {
+    await new Promise((resolve) => server.close(resolve))
+  }
+  assert.equal(await registerClient(1, { timeout: 300 }), false)
+  console.log('register client tests passed')
+}
+
+registerTests().catch((error) => {
+  console.error(error)
+  process.exitCode = 1
+})

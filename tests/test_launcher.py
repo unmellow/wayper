@@ -263,3 +263,79 @@ def test_run_app_waits_for_api_thread_after_second_instance_exit(tmp_path) -> No
     # The stop event was not set when Electron exited with the second-instance code.
     assert served == ["start", "still-serving"]
     assert threading.active_count() >= 1
+
+
+def _adopted_harness(monkeypatch, client_fn, alive_fn):
+    import threading
+
+    from wayper.server import launcher
+
+    stop = threading.Event()
+    api_thread = threading.Thread(target=stop.wait)
+    api_thread.start()
+    monkeypatch.setattr(launcher._api, "adopted_client", client_fn)
+    monkeypatch.setattr(launcher._api, "adopted_client_alive", alive_fn)
+    return launcher, stop, api_thread
+
+
+def test_adopted_backend_stays_up_while_registered_pid_alive(monkeypatch) -> None:
+    alive = {"value": True}
+    launcher, stop, api_thread = _adopted_harness(
+        monkeypatch, lambda: (1234, 99), lambda client: alive["value"]
+    )
+    import threading
+    import time
+
+    worker = threading.Thread(
+        target=launcher._serve_adopted_window,
+        args=(api_thread, stop),
+        kwargs={"register_timeout": 0.05, "poll": 0.02},
+    )
+    worker.start()
+    time.sleep(0.3)  # well past the registration timeout
+    assert not stop.is_set() and worker.is_alive()
+    alive["value"] = False  # the adopting Electron exits
+    worker.join(2)
+    assert stop.is_set() and not worker.is_alive()
+
+
+def test_adopted_backend_stops_when_nobody_registers(monkeypatch) -> None:
+    import time
+
+    launcher, stop, api_thread = _adopted_harness(monkeypatch, lambda: None, lambda c: True)
+    begun = time.monotonic()
+    launcher._serve_adopted_window(api_thread, stop, register_timeout=0.2, poll=0.02)
+    assert stop.is_set()
+    assert time.monotonic() - begun >= 0.2
+
+
+def test_client_registration_endpoint_records_pid_and_start(monkeypatch) -> None:
+    import os
+    import subprocess
+    import sys
+
+    from fastapi.testclient import TestClient
+
+    from wayper.server import api
+
+    monkeypatch.setattr(api, "_adopted_client", None)
+    client = TestClient(api.app)
+    pid = os.getpid()
+    start = api._pid_start_time(pid)
+    assert client.post("/api/client", json={"pid": pid, "start": start}).status_code == 200
+    assert api.adopted_client() == (pid, start)
+    assert api.adopted_client_alive(api.adopted_client())
+    if start is not None:
+        bad = client.post("/api/client", json={"pid": pid, "start": start + 1})
+        assert bad.status_code == 400
+        assert not api.adopted_client_alive((pid, start + 1))
+    dead = int(
+        subprocess.run(
+            [sys.executable, "-c", "import os; print(os.getpid())"],
+            capture_output=True,
+            text=True,
+            check=True,
+        ).stdout
+    )
+    assert client.post("/api/client", json={"pid": dead}).status_code == 400
+    assert not api.adopted_client_alive((dead, None))

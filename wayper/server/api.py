@@ -199,6 +199,43 @@ app.add_middleware(
 )
 
 
+# Electron main process that adopted this backend after a takeover, as
+# ``(pid, start_time)``. The launcher watches it in keep-serving mode.
+_adopted_client: tuple[int, int | None] | None = None
+
+
+def adopted_client() -> tuple[int, int | None] | None:
+    return _adopted_client
+
+
+def adopted_client_alive(client: tuple[int, int | None]) -> bool:
+    """True while the registered client pid is alive with the same start time."""
+    pid, start = client
+    if not _pid_is_alive(pid):
+        return False
+    return start is None or _pid_start_time(pid) in (None, start)
+
+
+@app.post("/api/client")
+async def register_client(payload: dict):
+    """Register the Electron main process that is using this backend."""
+    global _adopted_client
+    try:
+        pid = int(payload["pid"])
+    except (KeyError, TypeError, ValueError):
+        raise HTTPException(status_code=400, detail="pid required")
+    start = payload.get("start")
+    start = int(start) if isinstance(start, int | str) and str(start).isdigit() else None
+    if pid <= 0 or not _pid_is_alive(pid):
+        raise HTTPException(status_code=400, detail="pid is not alive")
+    actual = _pid_start_time(pid)
+    if start is not None and actual is not None and actual != start:
+        raise HTTPException(status_code=400, detail="start time mismatch")
+    _adopted_client = (pid, start if start is not None else actual)
+    log.info("Registered Wayper window process pid %d", pid)
+    return {"ok": True}
+
+
 _cached_config: WayperConfig | None = None
 _cached_mtime: float = 0
 
