@@ -38,6 +38,45 @@ function probeApi(port, timeout = 1000) {
   })
 }
 
+const TAKEOVER_MAX_AGE_MS = 60000
+
+function readFields(file) {
+  const fields = {}
+  try {
+    for (const part of fs.readFileSync(file, 'utf-8').split(/\s+/)) {
+      const [key, value] = part.split('=')
+      const number = Number.parseInt(value, 10)
+      if (key && Number.isInteger(number)) fields[key] = number
+    }
+  } catch (_) {
+    return {}
+  }
+  return fields
+}
+
+function procStat(pid) {
+  // Returns { state, start } from /proc/<pid>/stat, or null.
+  try {
+    const stat = fs.readFileSync(`/proc/${pid}/stat`, 'utf-8')
+    const rest = stat.slice(stat.lastIndexOf(')') + 1).trim().split(/\s+/)
+    return { state: rest[0], start: Number.parseInt(rest[19], 10) }
+  } catch (_) {
+    return null
+  }
+}
+
+// True if api.takeover is fresh and names a live (non-zombie) process whose
+// start time matches the one recorded, i.e. a backend is replacing a hung one.
+function takeoverInProgress(takeoverFile, now = Date.now()) {
+  if (!takeoverFile) return false
+  const { pid, start, ts } = readFields(takeoverFile)
+  if (!pid || start === undefined || ts === undefined) return false
+  if (now - ts * 1000 > TAKEOVER_MAX_AGE_MS) return false
+  const stat = procStat(pid)
+  if (!stat || stat.state === 'Z' || stat.state === 'X') return false
+  return stat.start === start
+}
+
 function delay(milliseconds) {
   return new Promise((resolve) => setTimeout(resolve, milliseconds))
 }
@@ -48,9 +87,23 @@ async function waitForApi(portFile, options = {}) {
   const requestTimeout = options.requestTimeout ?? 1000
   const probe = options.probe ?? probeApi
   const preferredPort = Number.parseInt(options.preferredPort || '0', 10)
-  const deadline = Date.now() + timeout
+  // While a takeover marker is valid, extend the wait to maxTimeout in total.
+  const maxTimeout = Math.max(timeout, options.maxTimeout ?? 30000)
+  const takeoverActive = options.takeoverActive
+    ?? (() => takeoverInProgress(options.takeoverFile))
+  const started = Date.now()
+  let deadline = started + timeout
+  let extended = false
+  const expired = () => {
+    if (Date.now() <= deadline) return false
+    if (!extended && takeoverActive()) {
+      extended = true
+      deadline = started + maxTimeout
+    }
+    return Date.now() > deadline
+  }
 
-  while (Date.now() <= deadline) {
+  while (!expired()) {
     const filePort = readPortFile(portFile)
     const candidates = [preferredPort, filePort].filter((port, index, ports) => (
       Number.isInteger(port)
@@ -63,11 +116,10 @@ async function waitForApi(portFile, options = {}) {
     }
 
     const remaining = deadline - Date.now()
-    if (remaining <= 0) break
-    await delay(Math.min(pollInterval, remaining))
+    await delay(Math.max(0, Math.min(pollInterval, remaining)))
   }
 
   return 0
 }
 
-module.exports = { probeApi, readPortFile, waitForApi }
+module.exports = { probeApi, readPortFile, takeoverInProgress, waitForApi }

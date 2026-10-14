@@ -129,6 +129,7 @@ async function waitForBackend(timeout = 10000) {
   const port = await waitForApi(getPortFilePath(), {
     timeout,
     preferredPort: configuredApiPort(),
+    takeoverFile: path.join(path.dirname(getPortFilePath()), 'api.takeover'),
   })
   if (port > 0) {
     console.log(`API ready on port: ${port}`)
