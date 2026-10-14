@@ -313,3 +313,45 @@ def test_lock_record_includes_start_time(tmp_path: Path) -> None:
     assert fields["pid"] == os.getpid() and fields["port"] == 5555
     if sys.platform.startswith("linux"):
         assert fields["start"] == api._pid_start_time(os.getpid())
+
+
+def test_stale_takeover_marker_is_removed_on_startup(monkeypatch, tmp_path: Path) -> None:
+    import os
+    import subprocess
+    import time
+
+    monkeypatch.setattr(api, "port_file", lambda: tmp_path / "api.port")
+    marker = api.takeover_file()
+    now = int(time.time())
+    dead = subprocess.run(
+        [sys.executable, "-c", "import os; print(os.getpid())"],
+        capture_output=True,
+        text=True,
+        check=True,
+    ).stdout.strip()
+    for content in (
+        f"pid={dead} start=1 ts={now}",  # dead pid
+        f"pid={os.getpid()} start=1 ts={now}",  # start-time mismatch
+        f"pid={os.getpid()} start={api._pid_start_time(os.getpid())} ts={now - 120}",  # old
+    ):
+        marker.write_text(content)
+        lock = api._acquire_api_lock()
+        assert lock is not None
+        assert not marker.exists(), content
+        lock.__exit__(None, None, None)
+
+
+def test_valid_takeover_marker_is_kept_on_startup(monkeypatch, tmp_path: Path) -> None:
+    import os
+    import time
+
+    if not sys.platform.startswith("linux"):
+        import pytest
+
+        pytest.skip("requires /proc")
+    monkeypatch.setattr(api, "port_file", lambda: tmp_path / "api.port")
+    marker = api.takeover_file()
+    pid = os.getpid()
+    marker.write_text(f"pid={pid} start={api._pid_start_time(pid)} ts={int(time.time())}")
+    api._remove_stale_takeover_marker()
+    assert marker.exists()

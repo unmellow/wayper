@@ -2074,6 +2074,13 @@ def takeover_in_progress(path: Path | None = None) -> bool:
     return _pid_is_alive(pid) and _pid_start_time(pid) == start
 
 
+def _remove_stale_takeover_marker() -> None:
+    """Delete api.takeover if its pid is dead/reused or it is older than 60s."""
+    path = takeover_file()
+    if path.exists() and not takeover_in_progress(path):
+        path.unlink(missing_ok=True)
+
+
 def _acquire_api_lock() -> FileLock | None:
     """Own the API/rotation lifecycle, or return ``None`` for a second launch.
 
@@ -2084,6 +2091,7 @@ def _acquire_api_lock() -> FileLock | None:
     A responsive or still-starting wayper owner is reused.
     """
     lock_path = port_file().with_suffix(".lock")
+    _remove_stale_takeover_marker()
     for attempt in range(2):
         lock = FileLock(blocking=False, path=lock_path)
         try:
