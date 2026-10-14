@@ -128,6 +128,14 @@ def _electron_dependencies_ready(electron_dir: Path) -> bool:
 
 
 TAKEOVER_WAIT_TIMEOUT = 30.0
+# Electron exits with this code when another Wayper window already holds the
+# single-instance lock (see main.js). That window still needs our backend.
+SECOND_INSTANCE_EXIT_CODE = 75
+
+
+def _keep_serving_for_existing_window(returncode: int | None, api_thread: threading.Thread) -> bool:
+    """True when our Electron lost the single-instance lock but we own the API."""
+    return returncode == SECOND_INSTANCE_EXIT_CODE and api_thread.is_alive()
 
 
 class _ApiDeadline:
@@ -265,7 +273,13 @@ def run_app(arguments: list[str] | None = None) -> None:
     signal.signal(signal.SIGTERM, cleanup)
 
     try:
-        proc.wait()
+        returncode = proc.wait()
+        if _keep_serving_for_existing_window(returncode, api_thread):
+            # E.g. right after taking over from a hung backend: the original
+            # window reconnects to this API, so stay up until signalled.
+            print("Another Wayper window is running; keeping the API server alive for it")
+            while api_thread.is_alive():
+                api_thread.join(0.5)
     except KeyboardInterrupt:
         cleanup(None, None)
     finally:
