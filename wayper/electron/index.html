@@ -193,6 +193,7 @@
                             </select>
                             <small class="hint">Use the system language unless you choose an override</small>
                         </div>
+                        <div id="settings-transitions" class="hidden">
                         <div class="field">
                             <label for="input-resize">Wallpaper Scaling</label>
                             <select id="input-resize">
@@ -202,6 +203,34 @@
                                 <option value="no">No scaling</option>
                             </select>
                             <small class="hint">How wallpapers are scaled to the screen</small>
+                        </div>
+                        <div class="field">
+                            <label for="input-transition-type">Transition Type</label>
+                            <select id="input-transition-type">
+                                <option value="none">None</option>
+                                <option value="simple">Simple</option>
+                                <option value="fade">Fade</option>
+                                <option value="left">Left</option>
+                                <option value="right">Right</option>
+                                <option value="top">Top</option>
+                                <option value="bottom">Bottom</option>
+                                <option value="wipe">Wipe</option>
+                                <option value="wave">Wave</option>
+                                <option value="grow">Grow</option>
+                                <option value="center">Center</option>
+                                <option value="outer">Outer</option>
+                                <option value="random">Random</option>
+                            </select>
+                            <small class="hint">Animation used when changing wallpapers</small>
+                        </div>
+                        <div class="field">
+                            <label for="input-transition-duration">Transition Duration (seconds)</label>
+                            <input type="number" id="input-transition-duration" min="0" step="0.1" value="0.5">
+                        </div>
+                        <div class="field">
+                            <label for="input-transition-fps">Transition FPS</label>
+                            <input type="number" id="input-transition-fps" min="1" value="60">
+                        </div>
                         </div>
                         <div class="field">
                             <label for="input-quota">Disk Quota (MB)</label>
@@ -276,7 +305,7 @@
                         <div class="field">
                             <label for="input-api-key">API Key</label>
                             <input type="password" id="input-api-key" placeholder="Your Wallhaven API key" class="code-font">
-                            <small class="hint">Required for NSFW — <a href="#" onclick="window.open('https://wallhaven.cc/settings/account','_blank');return false">get your key</a></small>
+                            <small class="hint">Required for NSFW — <a href="https://wallhaven.cc/settings/account" target="_blank">get your key</a></small>
                         </div>
                         <div class="field">
                             <label for="input-wh-username">Wallhaven Username</label>
@@ -284,20 +313,17 @@
                         </div>
                         <div class="field">
                             <label for="input-wh-password">Wallhaven Password</label>
-                            <input type="password" id="input-wh-password" class="code-font">
+                            <input type="password" id="input-wh-password" placeholder="Password" class="code-font">
                             <small class="hint">For favorite sync; optional with browser cookies</small>
                         </div>
                         <div class="field">
                             <label>Wallhaven Session</label>
-                            <div class="settings-inline-row">
-                                <button type="button" id="btn-wh-reconnect">Reconnect</button>
-                                <span id="wh-reconnect-status" class="hint" role="status"></span>
-                            </div>
+                            <button type="button" id="btn-wh-reconnect" class="btn-text">Reconnect</button>
                             <small class="hint">Save account changes first. Only this action may open a login window.</small>
                         </div>
                         <div class="field">
                             <label for="input-categories">Categories (General/Anime/People)</label>
-                            <input type="text" id="input-categories" placeholder="111" class="code-font">
+                            <input type="text" id="input-categories" value="111" class="code-font">
                             <small class="hint">111 = All, 010 = Anime only</small>
                         </div>
                         <div class="field">
@@ -319,7 +345,6 @@
                                 <option value="hot">Hot</option>
                                 <option value="random">Random</option>
                                 <option value="views">Views</option>
-                                <option value="favorites">Favorites</option>
                             </select>
                         </div>
                         <div class="field">
@@ -331,11 +356,8 @@
                         </div>
                     </div>
 
-                </div>
-
-                <div class="settings-card settings-card-wide settings-panel" id="settings-exclusions" role="tabpanel" aria-labelledby="settings-tab-filters" hidden>
-                    <h3>Exclusion Rules</h3>
-                    <div class="exclusion-grid">
+                    <div class="settings-card settings-panel" id="settings-exclusions" role="tabpanel" aria-labelledby="settings-tab-filters" hidden>
+                        <h3>Exclusion Rules</h3>
                         <div class="field">
                             <label for="input-exclude-tag">Exclude Tags</label>
                             <div class="tag-input-row">
