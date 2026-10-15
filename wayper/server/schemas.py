@@ -8,9 +8,6 @@ from pydantic import BaseModel, Field
 class StatusResponse(BaseModel):
     auto_rotation: bool
     rotation_paused: bool = False
-    # Scope echoed by the backend so clients can reject a late response after
-    # the selected monitor changes.  These fields are optional for old API
-    # callers that do not request a monitor-scoped status.
     monitor: str | None = None
     orientation: str | None = None
     pool_count: int = 0
@@ -62,7 +59,6 @@ class SetWallpaperRequest(BaseModel):
 class ActionRequest(BaseModel):
     image_path: str
     monitor: str | None = None
-    # This is a context label; the server recomputes candidate evidence.
     preference_context: str | None = None
 
 
@@ -72,15 +68,11 @@ class PreferenceFeedbackRequest(BaseModel):
 
 
 class ModelReviewActionRequest(BaseModel):
-    """Explicit decision for an image quarantined by automatic filtering."""
-
     path: str
     action: str
 
 
 class ModelReviewClearRequest(BaseModel):
-    """Library slice whose automatically held queue should be filtered."""
-
     purities: list[str] = Field(default_factory=list)
     orientation: str | None = None
 
@@ -123,6 +115,10 @@ class ConfigResponse(BaseModel):
     has_wh_password: bool
     wallhaven_username: str
     blacklist_ttl_days: int
+    resize: str = "crop"
+    transition_type: str = "grow"
+    transition_duration: float = 0.5
+    transition_fps: int = 60
     wallhaven: WallhavenConfigModel
 
 

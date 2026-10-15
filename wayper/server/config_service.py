@@ -6,7 +6,12 @@ from collections.abc import Callable
 from dataclasses import dataclass
 from pathlib import Path
 
-from wayper.config import WayperConfig, normalize_filter_strategy, normalize_language
+from wayper.config import (
+    WayperConfig,
+    normalize_filter_strategy,
+    normalize_language,
+    normalize_resize,
+)
 
 
 @dataclass(frozen=True, slots=True)
@@ -27,22 +32,21 @@ def config_payload(config: WayperConfig, mode: set[str]) -> dict[str, object]:
         "pause_on_lock": config.pause_on_lock,
         "safe_mode": config.safe_mode,
         "autostart": config.autostart,
-        # ``auto`` is intentionally retained here; the renderer resolves it
-        # against the host locale and can therefore switch languages without
-        # requiring a backend restart.
         "language": normalize_language(getattr(config, "language", "auto")),
         "has_api_key": bool(config.api_key),
         "has_wh_password": bool(config.wallhaven_password),
         "wallhaven_username": config.wallhaven_username,
         "blacklist_ttl_days": config.blacklist_ttl_days,
+        "resize": config.transition.resize,
+        "transition_type": config.transition.type,
+        "transition_duration": config.transition.duration,
+        "transition_fps": config.transition.fps,
         "wallhaven": {
             "categories": config.wallhaven.categories,
             "top_range": config.wallhaven.top_range,
             "sorting": config.wallhaven.sorting,
             "ai_art_filter": config.wallhaven.ai_art_filter,
             "filter_strategy": config.wallhaven.filter_strategy,
-            # Keep the alias in the payload for clients released before the
-            # strategy was given its final name.
             "filter_mode": config.wallhaven.filter_strategy,
             "batch_size": config.wallhaven.batch_size,
             "exclude_tags": config.wallhaven.exclude_tags,
@@ -90,13 +94,26 @@ def apply_config_updates(
         "blacklist_ttl_days": ("blacklist_ttl_days", lambda value: max(0, int(value))),
         "language": ("language", normalize_language),
     }
-    # Accept ``locale`` as a compatibility alias used by a few early GUI
-    # prototypes, while serializing the canonical ``language`` key.
     if "locale" in updates and "language" not in updates:
         updates = {**updates, "language": updates["locale"]}
     for key, (attribute, transform) in scalar_fields.items():
         if key in updates:
             setattr(config, attribute, transform(updates[key]))
+
+    if "resize" in updates:
+        config.transition.resize = normalize_resize(updates["resize"])
+    if "transition_type" in updates:
+        config.transition.type = str(updates["transition_type"]).strip() or "grow"
+    if "transition_duration" in updates:
+        try:
+            config.transition.duration = max(0.0, float(updates["transition_duration"]))
+        except (TypeError, ValueError):
+            pass
+    if "transition_fps" in updates:
+        try:
+            config.transition.fps = max(1, int(updates["transition_fps"]))
+        except (TypeError, ValueError):
+            pass
 
     if "download_dir" in updates:
         config.download_dir = resolve_download_dir(updates["download_dir"])
