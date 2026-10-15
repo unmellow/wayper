@@ -41,6 +41,9 @@ def config_payload(config: WayperConfig, mode: set[str]) -> dict[str, object]:
         "wallhaven_username": config.wallhaven_username,
         "blacklist_ttl_days": config.blacklist_ttl_days,
         "resize": config.transition.resize,
+        "transition_type": config.transition.type,
+        "transition_duration": config.transition.duration,
+        "transition_fps": config.transition.fps,
         "wallhaven": {
             "categories": config.wallhaven.categories,
             "top_range": config.wallhaven.top_range,
@@ -106,6 +109,18 @@ def apply_config_updates(
 
     if "resize" in updates:
         config.transition.resize = normalize_resize(updates["resize"])
+    if "transition_type" in updates:
+        config.transition.type = str(updates["transition_type"]).strip() or "grow"
+    if "transition_duration" in updates:
+        try:
+            config.transition.duration = max(0.0, float(updates["transition_duration"]))
+        except (TypeError, ValueError):
+            pass
+    if "transition_fps" in updates:
+        try:
+            config.transition.fps = max(1, int(updates["transition_fps"]))
+        except (TypeError, ValueError):
+            pass
 
     if "download_dir" in updates:
         config.download_dir = resolve_download_dir(updates["download_dir"])
