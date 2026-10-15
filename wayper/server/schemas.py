@@ -124,6 +124,9 @@ class ConfigResponse(BaseModel):
     wallhaven_username: str
     blacklist_ttl_days: int
     resize: str = "crop"
+    transition_type: str = "grow"
+    transition_duration: float = 0.5
+    transition_fps: int = 60
     wallhaven: WallhavenConfigModel
 
 
