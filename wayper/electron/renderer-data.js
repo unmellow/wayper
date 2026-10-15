@@ -133,6 +133,8 @@ function populateSettingsForm() {
     if (languageInput) {
         languageInput.value = window.WayperI18n?.normalizePreference?.(c.language) || c.language || 'auto';
     }
+    const resizeInput = document.getElementById('input-resize');
+    if (resizeInput) resizeInput.value = c.resize || 'crop';
     document.getElementById('input-quota').value = c.quota_mb;
     document.getElementById('input-download-dir').value = c.download_dir || '';
     document.getElementById('input-autostart').checked = c.autostart === true;
@@ -1279,6 +1281,8 @@ async function saveSettings() {
         safe_mode: document.getElementById('input-safe-mode').checked,
         autostart: document.getElementById('input-autostart').checked,
     };
+    const resizeInput = document.getElementById('input-resize');
+    if (resizeInput) updates.resize = resizeInput.value || 'crop';
     const languageInput = document.getElementById('input-language');
     if (languageInput) {
         updates.language = window.WayperI18n?.normalizePreference?.(languageInput.value)

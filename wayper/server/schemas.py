@@ -129,6 +129,7 @@ class ConfigResponse(BaseModel):
     has_wh_password: bool
     wallhaven_username: str
     blacklist_ttl_days: int
+    resize: str = "crop"
     wallhaven: WallhavenConfigModel
 
 

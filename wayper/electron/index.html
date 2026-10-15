@@ -194,6 +194,16 @@
                             <small class="hint">Use the system language unless you choose an override</small>
                         </div>
                         <div class="field">
+                            <label for="input-resize">Wallpaper Scaling</label>
+                            <select id="input-resize">
+                                <option value="crop">Crop to fill</option>
+                                <option value="fit">Fit (letterbox)</option>
+                                <option value="stretch">Stretch</option>
+                                <option value="no">No scaling</option>
+                            </select>
+                            <small class="hint">How wallpapers are scaled to the screen</small>
+                        </div>
+                        <div class="field">
                             <label for="input-quota">Disk Quota (MB)</label>
                             <input type="number" id="input-quota" min="100" value="4000">
                         </div>
