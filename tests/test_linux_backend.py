@@ -131,3 +131,18 @@ def test_resize_config_round_trip_and_validation(tmp_path: Path) -> None:
     config = WayperConfig(transition=TransitionConfig(resize="no"))
     save_config(config, path)
     assert load_config(path).transition.resize == "no"
+
+
+def test_resize_exposed_through_settings_api() -> None:
+    from pathlib import Path as _P
+
+    from wayper.config import WayperConfig
+    from wayper.server.config_service import apply_config_updates, config_payload
+
+    config = WayperConfig()
+    assert config_payload(config, set())["resize"] == "crop"
+    apply_config_updates(config, {"resize": "fit"}, resolve_download_dir=_P)
+    assert config.transition.resize == "fit"
+    assert config_payload(config, set())["resize"] == "fit"
+    apply_config_updates(config, {"resize": "bogus"}, resolve_download_dir=_P)
+    assert config.transition.resize == "crop"

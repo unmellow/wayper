@@ -6,7 +6,12 @@ from collections.abc import Callable
 from dataclasses import dataclass
 from pathlib import Path
 
-from wayper.config import WayperConfig, normalize_filter_strategy, normalize_language
+from wayper.config import (
+    WayperConfig,
+    normalize_filter_strategy,
+    normalize_language,
+    normalize_resize,
+)
 
 
 @dataclass(frozen=True, slots=True)
@@ -35,6 +40,7 @@ def config_payload(config: WayperConfig, mode: set[str]) -> dict[str, object]:
         "has_wh_password": bool(config.wallhaven_password),
         "wallhaven_username": config.wallhaven_username,
         "blacklist_ttl_days": config.blacklist_ttl_days,
+        "resize": config.transition.resize,
         "wallhaven": {
             "categories": config.wallhaven.categories,
             "top_range": config.wallhaven.top_range,
@@ -97,6 +103,9 @@ def apply_config_updates(
     for key, (attribute, transform) in scalar_fields.items():
         if key in updates:
             setattr(config, attribute, transform(updates[key]))
+
+    if "resize" in updates:
+        config.transition.resize = normalize_resize(updates["resize"])
 
     if "download_dir" in updates:
         config.download_dir = resolve_download_dir(updates["download_dir"])
