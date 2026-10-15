@@ -300,12 +300,95 @@
                         </div>
                     </div>
 
-                    <!-- Remaining settings panels omitted in this abbreviated upload for brevity; full file is on disk and will be completed in follow-up if needed -->
                     <div class="settings-card settings-panel" id="settings-wallhaven" role="tabpanel" aria-labelledby="settings-tab-wallhaven" hidden>
                         <h3>Wallhaven Source</h3>
-                        <!-- existing fields preserved in full commit -->
+                        <div class="field">
+                            <label for="input-api-key">API Key</label>
+                            <input type="password" id="input-api-key" placeholder="Your Wallhaven API key" class="code-font">
+                            <small class="hint">Required for NSFW — <a href="https://wallhaven.cc/settings/account" target="_blank">get your key</a></small>
+                        </div>
+                        <div class="field">
+                            <label for="input-wh-username">Wallhaven Username</label>
+                            <input type="text" id="input-wh-username" placeholder="Username" class="code-font">
+                        </div>
+                        <div class="field">
+                            <label for="input-wh-password">Wallhaven Password</label>
+                            <input type="password" id="input-wh-password" placeholder="Password" class="code-font">
+                            <small class="hint">For favorite sync; optional with browser cookies</small>
+                        </div>
+                        <div class="field">
+                            <label>Wallhaven Session</label>
+                            <button type="button" id="btn-wh-reconnect" class="btn-text">Reconnect</button>
+                            <small class="hint">Save account changes first. Only this action may open a login window.</small>
+                        </div>
+                        <div class="field">
+                            <label for="input-categories">Categories (General/Anime/People)</label>
+                            <input type="text" id="input-categories" value="111" class="code-font">
+                            <small class="hint">111 = All, 010 = Anime only</small>
+                        </div>
+                        <div class="field">
+                            <label for="input-top-range">Top Range</label>
+                            <select id="input-top-range">
+                                <option value="1d">Last Day</option>
+                                <option value="3d">Last 3 Days</option>
+                                <option value="1w">Last Week</option>
+                                <option value="1M">Last Month</option>
+                                <option value="3M">Last 3 Months</option>
+                                <option value="6M">Last 6 Months</option>
+                                <option value="1y">Last Year</option>
+                            </select>
+                        </div>
+                        <div class="field">
+                            <label for="input-sorting">Sorting</label>
+                            <select id="input-sorting">
+                                <option value="toplist">Toplist</option>
+                                <option value="hot">Hot</option>
+                                <option value="random">Random</option>
+                                <option value="views">Views</option>
+                            </select>
+                        </div>
+                        <div class="field">
+                            <label for="input-ai-art">AI Art Filter</label>
+                            <select id="input-ai-art">
+                                <option value="0">Allow AI</option>
+                                <option value="1">Block AI</option>
+                            </select>
+                        </div>
+                    </div>
+
+                    <div class="settings-card settings-panel" id="settings-exclusions" role="tabpanel" aria-labelledby="settings-tab-filters" hidden>
+                        <h3>Exclusion Rules</h3>
+                        <div class="field">
+                            <label for="input-exclude-tag">Exclude Tags</label>
+                            <div class="tag-input-row">
+                                <input type="text" id="input-exclude-tag" placeholder="Tag name..." class="tag-input">
+                                <button type="button" id="btn-add-tag" class="btn-add-tag">Add</button>
+                            </div>
+                            <div id="exclude-tags-container" class="tag-chips"></div>
+                            <small class="hint">Tags to exclude from Wallhaven downloads</small>
+                        </div>
+                        <div class="field" id="exclude-combos-field">
+                            <label for="input-exclude-combo">Exclude Combos</label>
+                            <div class="tag-input-row">
+                                <input type="text" id="input-exclude-combo" placeholder="Tag 1 + Tag 2..." class="tag-input" aria-describedby="exclude-combo-error exclude-combo-hint">
+                                <button type="button" id="btn-add-combo" class="btn-add-tag">Add</button>
+                            </div>
+                            <small id="exclude-combo-error" class="field-validation" role="status" aria-live="polite"></small>
+                            <div id="exclude-combos-container" class="tag-chips"></div>
+                            <small id="exclude-combo-hint" class="hint">Tag combinations — image excluded when ALL tags match</small>
+                        </div>
+                        <div class="field">
+                            <label for="input-exclude-uploader">Exclude Uploaders</label>
+                            <div class="tag-input-row">
+                                <input type="text" id="input-exclude-uploader" placeholder="Username..." class="tag-input">
+                                <button type="button" id="btn-add-uploader" class="btn-add-tag">Add</button>
+                            </div>
+                            <div id="exclude-uploaders-container" class="tag-chips"></div>
+                            <small class="hint">Uploaders to exclude — synced to Wallhaven user blacklist</small>
+                        </div>
                     </div>
                 </div>
+
                     </div>
                 </div>
             </div>
