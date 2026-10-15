@@ -133,8 +133,20 @@ function populateSettingsForm() {
     if (languageInput) {
         languageInput.value = window.WayperI18n?.normalizePreference?.(c.language) || c.language || 'auto';
     }
+    // Show transitions section only on Linux (the only platform that uses them)
+    const transitionsSection = document.getElementById('settings-transitions');
+    if (transitionsSection) {
+        const isLinux = window.electronAPI?.platform === 'linux';
+        transitionsSection.classList.toggle('hidden', !isLinux);
+    }
     const resizeInput = document.getElementById('input-resize');
     if (resizeInput) resizeInput.value = c.resize || 'crop';
+    const typeInput = document.getElementById('input-transition-type');
+    if (typeInput) typeInput.value = c.transition_type || 'grow';
+    const durationInput = document.getElementById('input-transition-duration');
+    if (durationInput) durationInput.value = c.transition_duration ?? 0.5;
+    const fpsInput = document.getElementById('input-transition-fps');
+    if (fpsInput) fpsInput.value = c.transition_fps ?? 60;
     document.getElementById('input-quota').value = c.quota_mb;
     document.getElementById('input-download-dir').value = c.download_dir || '';
     document.getElementById('input-autostart').checked = c.autostart === true;
@@ -1283,6 +1295,12 @@ async function saveSettings() {
     };
     const resizeInput = document.getElementById('input-resize');
     if (resizeInput) updates.resize = resizeInput.value || 'crop';
+    const typeInput = document.getElementById('input-transition-type');
+    if (typeInput) updates.transition_type = typeInput.value || 'grow';
+    const durationInput = document.getElementById('input-transition-duration');
+    if (durationInput) updates.transition_duration = parseFloat(durationInput.value) || 0.5;
+    const fpsInput = document.getElementById('input-transition-fps');
+    if (fpsInput) updates.transition_fps = parseInt(fpsInput.value) || 60;
     const languageInput = document.getElementById('input-language');
     if (languageInput) {
         updates.language = window.WayperI18n?.normalizePreference?.(languageInput.value)
